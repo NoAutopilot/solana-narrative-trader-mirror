@@ -81,7 +81,38 @@ proactive_engine = get_proactive_engine()
 STRATEGY_VERSION = "v4_rebuilt_twitter"
 
 # Live execution tracking: maps paper_trade_id -> live buy result
-live_trade_map = {}
+# Rebuild from DB on startup so restarts don't lose open positions
+def _rebuild_live_trade_map():
+    """Rebuild live_trade_map from DB: find buys without matching sells."""
+    _map = {}
+    try:
+        import sqlite3
+        from config.config import DB_PATH as _DB_PATH
+        _db = sqlite3.connect(_DB_PATH)
+        _db.row_factory = sqlite3.Row
+        rows = _db.execute("""
+            SELECT lt.paper_trade_id, lt.mint_address, lt.token_name, lt.token_symbol,
+                   lt.tx_signature, lt.executed_at
+            FROM live_trades lt
+            WHERE lt.action='buy' AND lt.success=1
+            AND lt.paper_trade_id NOT IN (
+                SELECT COALESCE(paper_trade_id, -1) FROM live_trades WHERE action='sell'
+            )
+        """).fetchall()
+        for r in rows:
+            _map[r['paper_trade_id']] = {
+                'tx_signature': r['tx_signature'],
+                'mint_address': r['mint_address'],
+                'token_name': r['token_name'],
+            }
+        _db.close()
+        if _map:
+            logger.info(f"[LIVE] Rebuilt live_trade_map from DB: {len(_map)} open positions")
+    except Exception as e:
+        logger.warning(f"[LIVE] Could not rebuild live_trade_map: {e}")
+    return _map
+
+live_trade_map = _rebuild_live_trade_map()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
