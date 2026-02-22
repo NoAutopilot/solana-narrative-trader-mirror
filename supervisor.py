@@ -49,9 +49,32 @@ restart_counts = {}
 shutdown_flag = False
 
 
+def kill_existing(name):
+    """Kill any existing process with the same script name to prevent duplicates."""
+    script_name = f"{name}.py"
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", script_name], capture_output=True, text=True
+        )
+        pids = [int(p) for p in result.stdout.strip().split() if p.strip()]
+        my_pid = os.getpid()
+        for pid in pids:
+            if pid != my_pid:
+                logger.info(f"Killing existing {name} (PID {pid})")
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    except Exception:
+        pass
+
+
 def start_process(name):
     config = MANAGED_PROCESSES[name]
     log_file = os.path.join(LOGS_DIR, f"{name}.log")
+    # Kill any existing instance first
+    kill_existing(name)
+    time.sleep(1)
     logger.info(f"Starting {name}...")
     try:
         with open(log_file, "a") as lf:
@@ -96,12 +119,31 @@ def handle_shutdown(signum, frame):
     sys.exit(0)
 
 
+def acquire_lock():
+    """Prevent multiple supervisors from running."""
+    pid_file = os.path.join(BASE_DIR, "supervisor.pid")
+    # Check if another supervisor is running
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)  # Check if process exists
+            logger.error(f"Another supervisor is already running (PID {old_pid}). Exiting.")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # Old process is dead, take over
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+    return pid_file
+
+
 def main():
     logger.info("=" * 50)
     logger.info("Supervisor starting")
     logger.info(f"Managing: {list(MANAGED_PROCESSES.keys())}")
     logger.info("=" * 50)
 
+    pid_file = acquire_lock()
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
