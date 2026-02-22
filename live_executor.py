@@ -286,13 +286,37 @@ def execute_buy(mint_address, token_name="", amount_sol=None):
     return result
 
 
+def _try_reclaim_rent(mint_address, token_name=""):
+    """Attempt to close the empty token account after a sell to reclaim rent."""
+    try:
+        from rent_reclaim import find_token_account_for_mint, close_single_account
+        import time as _time
+        _time.sleep(2)  # Wait for sell to finalize
+        
+        acc = find_token_account_for_mint(mint_address)
+        if acc and acc["amount"] == 0:
+            success, result = close_single_account(acc["pubkey"], acc["program_id"])
+            if success:
+                rent_sol = acc["lamports"] / 1e9
+                logger.info(f"[RENT RECLAIM] {token_name}: recovered {rent_sol:.6f} SOL — tx={result}")
+                return rent_sol
+            else:
+                logger.debug(f"[RENT RECLAIM] {token_name}: failed — {result}")
+        elif acc:
+            logger.debug(f"[RENT RECLAIM] {token_name}: account not empty yet (amount={acc['amount']})")
+    except Exception as e:
+        logger.debug(f"[RENT RECLAIM] {token_name}: error — {e}")
+    return 0.0
+
+
 def execute_sell(mint_address, token_name="", sell_pct=100):
     """
     Execute a live SELL via PumpPortal Lightning API.
     Sells a percentage of tokens held.
+    After a successful 100% sell, attempts to close the empty token account to reclaim rent.
     
     Returns:
-        dict with keys: success, tx_signature, error, timestamp
+        dict with keys: success, tx_signature, error, timestamp, rent_reclaimed
     """
     global _total_sol_received
 
@@ -355,6 +379,11 @@ def execute_sell(mint_address, token_name="", sell_pct=100):
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"[LIVE SELL ERROR] {token_name}: {e}")
+
+    # Attempt rent reclaim after successful 100% sell
+    result["rent_reclaimed"] = 0.0
+    if result["success"] and sell_pct == 100:
+        result["rent_reclaimed"] = _try_reclaim_rent(mint_address, token_name)
 
     return result
 

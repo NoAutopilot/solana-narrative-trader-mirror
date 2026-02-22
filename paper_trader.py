@@ -43,7 +43,7 @@ from proactive_narratives import (
     feed_narratives_to_engine,
 )
 from twitter_signal import check_twitter_signal
-from live_executor import execute_buy, execute_sell, can_execute_live, get_live_stats, passes_conviction_filter
+from live_executor import execute_buy, execute_sell, can_execute_live, get_live_stats, passes_conviction_filter, LIVE_TRADE_SIZE_SOL
 
 # ── Logging (explicit handlers — basicConfig is stolen by narrative_monitor import) ──
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -59,6 +59,14 @@ if not logger.handlers:
     sh.setFormatter(fmt)
     logger.addHandler(fh)
     logger.addHandler(sh)
+
+# Also route live_executor and rent_reclaim logs to the same file
+for child_name in ("live_executor", "rent_reclaim"):
+    child_logger = logging.getLogger(child_name)
+    child_logger.setLevel(logging.INFO)
+    if not child_logger.handlers:
+        child_logger.addHandler(fh)
+        child_logger.addHandler(sh)
 
 # ── State ────────────────────────────────────────────────────────────────────
 open_trades = {}
@@ -468,17 +476,22 @@ def close_trade(trade_id, trade_info, exit_reason, pnl_pct, current_price_sol):
                 token_name=trade_info["name"],
                 sell_pct=100
             )
+            # Estimate returned SOL from the buy amount + paper PnL %
+            buy_amount = live_buy.get("amount_sol", LIVE_TRADE_SIZE_SOL)
+            returned_sol = buy_amount * (1 + pnl_pct / 100) if pnl_pct else 0
+            live_pnl = returned_sol - buy_amount
             db.log_live_trade(
                 paper_trade_id=trade_id,
                 mint_address=trade_info["mint"],
                 token_name=trade_info["name"],
                 token_symbol=trade_info["symbol"],
                 action="sell",
-                amount_sol=0,  # selling tokens, not SOL
+                amount_sol=round(returned_sol, 6),
                 tx_signature=sell_result.get("tx_signature"),
                 success=sell_result.get("success", False),
                 error=sell_result.get("error"),
                 paper_price_sol=current_price_sol,
+                pnl_sol=round(live_pnl, 6),
                 pnl_pct=pnl_pct,
                 hold_time_sec=hold_time_sec,
             )
