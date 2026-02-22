@@ -43,7 +43,7 @@ from proactive_narratives import (
     feed_narratives_to_engine,
 )
 from twitter_signal import check_twitter_signal
-from live_executor import execute_buy, execute_sell, can_execute_live, get_live_stats
+from live_executor import execute_buy, execute_sell, can_execute_live, get_live_stats, passes_conviction_filter
 
 # ── Logging (explicit handlers — basicConfig is stolen by narrative_monitor import) ──
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -360,29 +360,38 @@ def enter_trade(token_data, decision, details, narratives):
 
     # ── LIVE EXECUTION (parallel, non-blocking) ──
     try:
-        can_trade, reason = can_execute_live()
-        if can_trade:
-            live_result = execute_buy(mint_address=mint, token_name=name)
-            db.log_live_trade(
-                paper_trade_id=trade_id,
-                mint_address=mint,
-                token_name=name,
-                token_symbol=symbol,
-                action="buy",
-                amount_sol=live_result.get("amount_sol", 0),
-                tx_signature=live_result.get("tx_signature"),
-                success=live_result.get("success", False),
-                error=live_result.get("error"),
-                paper_price_sol=entry_price_sol,
-            )
-            if live_result.get("success"):
-                live_trade_map[trade_id] = live_result
-                trade_info["live_buy"] = live_result
-                logger.info(f"[LIVE BUY] {name}: tx={live_result.get('tx_signature')}")
-            else:
-                logger.warning(f"[LIVE BUY FAILED] {name}: {live_result.get('error')}")
+        # Check conviction filter first (before safety checks to avoid unnecessary RPC calls)
+        passes, filter_reason = passes_conviction_filter(
+            trade_mode=decision,
+            twitter_signal=twitter_signal,
+            category=details.get("category", "default"),
+        )
+        if not passes:
+            logger.debug(f"[LIVE FILTER] {name}: {filter_reason}")
         else:
-            logger.debug(f"[LIVE SKIP] {name}: {reason}")
+            can_trade, reason = can_execute_live()
+            if can_trade:
+                live_result = execute_buy(mint_address=mint, token_name=name)
+                db.log_live_trade(
+                    paper_trade_id=trade_id,
+                    mint_address=mint,
+                    token_name=name,
+                    token_symbol=symbol,
+                    action="buy",
+                    amount_sol=live_result.get("amount_sol", 0),
+                    tx_signature=live_result.get("tx_signature"),
+                    success=live_result.get("success", False),
+                    error=live_result.get("error"),
+                    paper_price_sol=entry_price_sol,
+                )
+                if live_result.get("success"):
+                    live_trade_map[trade_id] = live_result
+                    trade_info["live_buy"] = live_result
+                    logger.info(f"[LIVE BUY] {name}: tx={live_result.get('tx_signature')}")
+                else:
+                    logger.warning(f"[LIVE BUY FAILED] {name}: {live_result.get('error')}")
+            else:
+                logger.debug(f"[LIVE SKIP] {name}: {reason}")
     except Exception as e:
         logger.error(f"[LIVE BUY ERROR] {name}: {e}")
 

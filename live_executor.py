@@ -31,10 +31,13 @@ LIVE_PRIORITY_FEE = float(os.getenv("LIVE_PRIORITY_FEE", "0.0001"))
 LIVE_ENABLED = os.getenv("LIVE_ENABLED", "false").lower() == "true"
 
 # Safety limits
-MAX_SOL_PER_TRADE = 0.02          # Hard cap: never spend more than this per trade
+MAX_SOL_PER_TRADE = 0.05          # Hard cap: never spend more than this per trade
 MIN_WALLET_BALANCE_SOL = 0.01     # Stop trading if balance drops below this
 MAX_LIVE_TRADES_PER_HOUR = 20     # Rate limit
-MAX_TOTAL_LIVE_TRADES = 200       # Lifetime cap for safety
+MAX_TOTAL_LIVE_TRADES = 500       # Lifetime cap for safety
+
+# Conviction filter
+LIVE_CONVICTION_FILTER = os.getenv("LIVE_CONVICTION_FILTER", "all")
 
 # Tracking
 _live_trade_count = 0
@@ -121,6 +124,49 @@ def _check_lifetime_cap():
         logger.warning(f"Lifetime cap hit: {_live_trade_count} total live trades")
         return False
     return True
+
+
+def passes_conviction_filter(trade_mode, twitter_signal=None, category=None):
+    """
+    Check if a trade passes the conviction filter for live execution.
+    Paper trading continues for ALL trades regardless.
+    
+    Filters:
+      - 'all': execute every trade live (original behavior)
+      - 'narrative_only': only narrative and proactive modes
+      - 'high_conviction': narrative/proactive + tweets>=15 + has_kol
+    """
+    filt = LIVE_CONVICTION_FILTER
+    
+    if filt == "all":
+        return True, "No filter"
+    
+    if filt == "narrative_only":
+        if trade_mode in ("narrative", "proactive"):
+            return True, "Narrative/proactive mode"
+        return False, f"Control trade filtered (mode={trade_mode})"
+    
+    if filt == "high_conviction":
+        # Must be narrative or proactive
+        if trade_mode not in ("narrative", "proactive"):
+            return False, f"Control trade filtered (mode={trade_mode})"
+        
+        # Must have twitter signal with tweets>=15 and has_kol
+        if not twitter_signal:
+            return False, "No twitter signal data"
+        
+        tweet_count = twitter_signal.get("tweet_count", 0) if isinstance(twitter_signal, dict) else 0
+        has_kol = twitter_signal.get("has_kol", False) if isinstance(twitter_signal, dict) else False
+        
+        if tweet_count < 15:
+            return False, f"Low tweet count ({tweet_count}<15)"
+        if not has_kol:
+            return False, "No KOL engagement"
+        
+        return True, f"High conviction: tweets={tweet_count}, kol=True"
+    
+    # Unknown filter, default to all
+    return True, f"Unknown filter '{filt}', defaulting to all"
 
 
 def can_execute_live():
@@ -334,4 +380,5 @@ def get_live_stats():
         "max_trades_per_hour": MAX_LIVE_TRADES_PER_HOUR,
         "max_total_trades": MAX_TOTAL_LIVE_TRADES,
         "min_balance": MIN_WALLET_BALANCE_SOL,
+        "conviction_filter": LIVE_CONVICTION_FILTER,
     }
