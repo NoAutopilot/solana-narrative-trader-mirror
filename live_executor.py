@@ -6,6 +6,8 @@ All trades go through PumpPortal's Lightning Transaction API.
 v2: Added on-chain TX validation and pool retry for migrated tokens (error 6024).
 v3: Audit fixes — env-configurable rate/lifetime/concurrent limits, pool="pump" for
     pre-bonding buys, enhanced failure/slippage/timing logging.
+v3.2: Async buy verification — TX submits in ~1-2s, verification runs in background
+     thread. Paper trader no longer blocks 12s per live buy.
 """
 
 import os
@@ -13,6 +15,7 @@ import time
 import json
 import logging
 import requests
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -67,6 +70,10 @@ _hourly_trade_times = []
 _total_sol_spent = 0.0
 _total_sol_received = 0.0
 _open_live_trades = set()  # Track currently open live trade IDs for concurrent limit
+
+# Pending buy verifications — background thread checks these
+_pending_buy_verifications = {}  # {paper_trade_id: {signature, mint, token_name, amount_sol, buy_start}}
+_verification_lock = threading.Lock()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXECUTION METRICS — collected for slippage/failure analysis
@@ -488,38 +495,46 @@ def execute_buy(mint_address, token_name="", amount_sol=None, paper_trade_id=Non
             logger.error(f"[LIVE BUY FAILED] {token_name}: {api_error}")
             return result
 
+        # TX submitted successfully — return immediately, verify in background
+        submit_elapsed = time.time() - buy_start
         result["tx_signature"] = signature
+        result["success"] = True  # Optimistic: assume success, bg thread will flag failures
+        result["confirm_time_sec"] = round(submit_elapsed, 2)
         
-        # Validate on-chain
-        confirmed, on_chain_error, sol_change = _verify_tx_on_chain(signature)
-        confirm_elapsed = time.time() - buy_start
-        result["confirm_time_sec"] = round(confirm_elapsed, 2)
-        result["sol_change"] = sol_change
+        _live_trade_count += 1
+        _hourly_trade_times.append(time.time())
+        _total_sol_spent += trade_amount
+        _execution_metrics["buy_successes"] += 1
+        if paper_trade_id is not None:
+            _open_live_trades.add(paper_trade_id)
         
-        # Log timing metric
-        _execution_metrics["tx_confirm_times"].append(("buy", confirm_elapsed))
+        logger.info(f"[LIVE BUY SUBMITTED] {token_name}: tx={signature} submit_time={submit_elapsed:.1f}s (async verify starting)")
         
-        # Log slippage observation: expected to spend -trade_amount, actual sol_change
-        if sol_change is not None:
-            _execution_metrics["slippage_observations"].append(("buy", -trade_amount, sol_change))
-            slippage_pct = ((abs(sol_change) - trade_amount) / trade_amount * 100) if trade_amount > 0 else 0
-            logger.info(f"[LIVE BUY SLIPPAGE] {token_name}: expected={trade_amount:.6f} actual_change={sol_change:.6f} slippage={slippage_pct:+.1f}%")
+        # Launch background verification thread
+        def _bg_verify_buy():
+            try:
+                confirmed, on_chain_error, sol_change = _verify_tx_on_chain(signature)
+                confirm_elapsed = time.time() - buy_start
+                _execution_metrics["tx_confirm_times"].append(("buy", confirm_elapsed))
+                
+                if sol_change is not None:
+                    _execution_metrics["slippage_observations"].append(("buy", -trade_amount, sol_change))
+                    slippage_pct = ((abs(sol_change) - trade_amount) / trade_amount * 100) if trade_amount > 0 else 0
+                    logger.info(f"[LIVE BUY VERIFIED] {token_name}: confirmed={confirmed} sol_change={sol_change:.6f} slippage={slippage_pct:+.1f}% confirm={confirm_elapsed:.1f}s")
+                
+                if not confirmed:
+                    # TX failed on-chain — log it, adjust metrics
+                    _execution_metrics["buy_successes"] -= 1
+                    _execution_metrics["buy_failures"] += 1
+                    if paper_trade_id is not None:
+                        _open_live_trades.discard(paper_trade_id)
+                    logger.error(f"[LIVE BUY ON-CHAIN FAIL] {token_name}: {on_chain_error} tx={signature} (detected async)")
+                else:
+                    logger.info(f"[LIVE BUY CONFIRMED] {token_name}: tx={signature} confirm={confirm_elapsed:.1f}s sol_change={sol_change}")
+            except Exception as e:
+                logger.warning(f"[LIVE BUY VERIFY ERROR] {token_name}: {e}")
         
-        if confirmed:
-            result["success"] = True
-            _live_trade_count += 1
-            _hourly_trade_times.append(time.time())
-            _total_sol_spent += trade_amount
-            _execution_metrics["buy_successes"] += 1
-            # Track open live trade
-            if paper_trade_id is not None:
-                _open_live_trades.add(paper_trade_id)
-            logger.info(f"[LIVE BUY SUCCESS] {token_name}: tx={signature} confirm={confirm_elapsed:.1f}s sol_change={sol_change}")
-        else:
-            result["success"] = False
-            result["error"] = f"TX failed on-chain: {on_chain_error}"
-            _execution_metrics["buy_failures"] += 1
-            logger.error(f"[LIVE BUY ON-CHAIN FAIL] {token_name}: {on_chain_error} tx={signature}")
+        threading.Thread(target=_bg_verify_buy, daemon=True).start()
 
     except requests.exceptions.Timeout:
         result["error"] = "Request timed out (30s)"
@@ -782,4 +797,6 @@ def get_live_stats():
             "recent_failed_sells": _execution_metrics["failed_sell_details"][-5:],  # Last 5 failures
             "slippage_observations_count": len(_execution_metrics["slippage_observations"]),
         },
+        # Async verification status
+        "pending_verifications": len(_pending_buy_verifications),
     }
