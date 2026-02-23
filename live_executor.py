@@ -55,6 +55,12 @@ TX_CONFIRM_RETRY_WAIT = 3         # Wait between retries
 # Pool retry order for sells when bonding curve is complete (error 6024)
 SELL_POOL_RETRY_ORDER = ["auto", "pump-amm", "raydium"]
 
+# Time-bounded experiment: auto-halt after LIVE_EXPERIMENT_DURATION_SEC
+# Set to 0 or unset to disable (no time limit)
+LIVE_EXPERIMENT_DURATION_SEC = int(os.getenv("LIVE_EXPERIMENT_DURATION_SEC", "0"))
+_live_start_time = None  # Set when first live trade executes
+_live_halted_by_timer = False
+
 # Tracking
 _live_trade_count = 0
 _hourly_trade_times = []
@@ -308,6 +314,27 @@ def passes_conviction_filter(trade_mode, twitter_signal=None, category=None):
     return True, f"Unknown filter '{filt}', defaulting to all"
 
 
+def _check_experiment_timer():
+    """Check if the time-bounded experiment has expired. Sells are always allowed."""
+    global _live_halted_by_timer
+    if LIVE_EXPERIMENT_DURATION_SEC <= 0:
+        return True  # No time limit
+    if _live_start_time is None:
+        return True  # Haven't started yet
+    elapsed = time.time() - _live_start_time
+    if elapsed >= LIVE_EXPERIMENT_DURATION_SEC:
+        if not _live_halted_by_timer:
+            _live_halted_by_timer = True
+            remaining_open = len(_open_live_trades)
+            logger.warning(
+                f"[LIVE EXPERIMENT] Time limit reached ({LIVE_EXPERIMENT_DURATION_SEC}s / "
+                f"{LIVE_EXPERIMENT_DURATION_SEC/3600:.1f}h). No new buys. "
+                f"{remaining_open} open positions will still be sold when paper exits trigger."
+            )
+        return False
+    return True
+
+
 def can_execute_live():
     """Check all safety conditions before executing a live trade."""
     if not LIVE_ENABLED:
@@ -324,6 +351,10 @@ def can_execute_live():
 
     if not _check_concurrent_limit():
         return False, "Concurrent trade limit exceeded"
+
+    if not _check_experiment_timer():
+        elapsed = time.time() - _live_start_time if _live_start_time else 0
+        return False, f"Experiment time limit reached ({elapsed:.0f}s / {LIVE_EXPERIMENT_DURATION_SEC}s)"
 
     # Check wallet balance
     balance = get_wallet_balance_sol()
@@ -430,6 +461,16 @@ def execute_buy(mint_address, token_name="", amount_sol=None, paper_trade_id=Non
         logger.warning(f"Trade amount capped to {MAX_SOL_PER_TRADE} SOL")
 
     result["amount_sol"] = trade_amount
+
+    # Start experiment timer on first live buy
+    global _live_start_time
+    if _live_start_time is None and LIVE_EXPERIMENT_DURATION_SEC > 0:
+        _live_start_time = time.time()
+        logger.info(
+            f"[LIVE EXPERIMENT] Timer started. Will halt new buys after "
+            f"{LIVE_EXPERIMENT_DURATION_SEC}s ({LIVE_EXPERIMENT_DURATION_SEC/3600:.1f}h). "
+            f"Open positions will still be sold normally."
+        )
 
     try:
         logger.info(f"[LIVE BUY] Executing: {token_name} ({mint_address}) for {trade_amount} SOL pool={LIVE_BUY_POOL}")
@@ -714,6 +755,12 @@ def get_live_stats():
         "max_concurrent_trades": MAX_CONCURRENT_LIVE_TRADES,
         "min_balance": MIN_WALLET_BALANCE_SOL,
         "conviction_filter": LIVE_CONVICTION_FILTER,
+        # Experiment timer
+        "experiment_duration_sec": LIVE_EXPERIMENT_DURATION_SEC,
+        "experiment_start_time": _live_start_time,
+        "experiment_elapsed_sec": round(time.time() - _live_start_time, 1) if _live_start_time else 0,
+        "experiment_remaining_sec": max(0, round(LIVE_EXPERIMENT_DURATION_SEC - (time.time() - _live_start_time), 1)) if (_live_start_time and LIVE_EXPERIMENT_DURATION_SEC > 0) else None,
+        "experiment_halted": _live_halted_by_timer,
         # Execution metrics
         "execution_metrics": {
             "buy_attempts": _execution_metrics["buy_attempts"],
