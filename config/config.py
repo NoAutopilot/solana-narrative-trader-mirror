@@ -77,7 +77,7 @@ CONTROL_SAMPLE_RATE  = 0.15    # 15% of non-narrative tokens enter as control
 # ── Exit Strategy (default) ──────────────────────────────────────────────────
 TAKE_PROFIT_PCT      = 0.30    # 30% take profit
 STOP_LOSS_PCT        = -0.25   # 25% stop loss
-TIMEOUT_MINUTES      = 5       # Close after 5 min if no exit triggered (was 15; data shows all winners close <5 min)
+TIMEOUT_MINUTES      = 2       # Close after 2 min (data: 100% winners close <2min, 96% of TP profit in <1min; saves capital)
 PRICE_CHECK_INTERVAL = 10      # Seconds between price checks for open trades
 
 # ── Trailing Take Profit ─────────────────────────────────────────────────────

@@ -132,9 +132,9 @@ try:
     if timeout_match:
         timeout = int(timeout_match.group(1))
         if timeout == 5:
-            check("Timeout set to 5 minutes", PASS, f"TIMEOUT_MINUTES = {timeout}")
+            check("Timeout set to 2 minutes", PASS, f"TIMEOUT_MINUTES = {timeout}")
         else:
-            check("Timeout set to 5 minutes", FAIL, f"TIMEOUT_MINUTES = {timeout} (should be 5)")
+            check("Timeout set to 2 minutes", FAIL, f"TIMEOUT_MINUTES = {timeout} (should be 2)")
     
     # Parse TAKE_PROFIT_PCT
     tp_match = re.search(r'TAKE_PROFIT_PCT\s*=\s*([\d.]+)', config_text)
