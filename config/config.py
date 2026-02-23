@@ -75,14 +75,14 @@ MAX_CONCURRENT_TRADES = 50     # Max open positions
 CONTROL_SAMPLE_RATE  = 0.15    # 15% of non-narrative tokens enter as control
 
 # ── Exit Strategy (default) ──────────────────────────────────────────────────
-TAKE_PROFIT_PCT      = 0.30    # 30% take profit
+TAKE_PROFIT_PCT = 100.0  # Effectively disabled — let trailing TP handle moonshots    # 30% take profit
 STOP_LOSS_PCT        = -0.25   # 25% stop loss
 TIMEOUT_MINUTES      = 2       # Close after 2 min (data: 100% winners close <2min, 96% of TP profit in <1min; saves capital)
 PRICE_CHECK_INTERVAL = 10      # Seconds between price checks for open trades
 
 # ── Trailing Take Profit ─────────────────────────────────────────────────────
-TRAILING_TP_ACTIVATE = 0.20    # Activate trailing TP at 20% profit
-TRAILING_TP_DISTANCE = 0.10    # Trail 10% behind peak
+TRAILING_TP_ACTIVATE = 0.15  # Activate trailing TP at 15% gross gain    # Activate trailing TP at 20% profit
+TRAILING_TP_DISTANCE = 0.08  # Trail 8% behind peak (tighter = captures more)    # Trail 10% behind peak
 
 # ── Virtual Exit Strategies ──────────────────────────────────────────────────
 VIRTUAL_STRATEGIES = {

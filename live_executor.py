@@ -50,6 +50,7 @@ LIVE_CONVICTION_FILTER = os.getenv("LIVE_CONVICTION_FILTER", "all")
 
 # Buy pool routing: "pump" for pre-bonding (faster, no lookup latency)
 LIVE_BUY_POOL = os.getenv("LIVE_BUY_POOL", "pump")
+BUY_POOL_FALLBACK_ORDER = ["pump", "pump-amm"]  # Try pump first, fallback to pump-amm for migrated tokens
 
 # On-chain validation settings
 TX_CONFIRM_WAIT_SEC = 8           # Wait before checking TX on-chain
@@ -488,19 +489,29 @@ def execute_buy(mint_address, token_name="", amount_sol=None, paper_trade_id=Non
         )
 
     try:
-        logger.info(f"[LIVE BUY] Executing: {token_name} ({mint_address}) for {trade_amount} SOL pool={LIVE_BUY_POOL}")
-
-        signature, api_error = _submit_trade(
-            "buy", mint_address,
-            pool=LIVE_BUY_POOL,
-            amount=trade_amount,
-            denominatedInSol="true",
-        )
-
+        pools_to_try = BUY_POOL_FALLBACK_ORDER if LIVE_BUY_POOL == "pump" else [LIVE_BUY_POOL]
+        signature = None
+        api_error = None
+        for buy_pool in pools_to_try:
+            logger.info(f"[LIVE BUY] Executing: {token_name} ({mint_address}) for {trade_amount} SOL pool={buy_pool}")
+            signature, api_error = _submit_trade(
+                "buy", mint_address,
+                pool=buy_pool,
+                amount=trade_amount,
+                denominatedInSol="true",
+            )
+            if api_error:
+                if "migrated" in str(api_error).lower() or "bonding curve" in str(api_error).lower() or "6024" in str(api_error):
+                    logger.warning(f"[LIVE BUY] {token_name}: pool={buy_pool} failed (migrated?), trying next...")
+                    continue
+                else:
+                    break
+            else:
+                break
         if api_error:
             result["error"] = api_error
             _execution_metrics["buy_failures"] += 1
-            logger.error(f"[LIVE BUY FAILED] {token_name}: {api_error}")
+            logger.error(f"[LIVE BUY FAILED] {token_name}: {api_error} (tried: {pools_to_try})")
             return result
 
         # TX submitted successfully — return immediately, verify in background
@@ -685,44 +696,48 @@ def execute_sell(mint_address, token_name="", sell_pct=100, paper_trade_id=None)
                     _execution_metrics["sell_pool_retries"] += 1
                     continue
 
-            # Validate on-chain
-            confirmed, on_chain_error, sol_change = _verify_tx_on_chain(signature)
-            confirm_elapsed = time.time() - sell_start
-            result["confirm_time_sec"] = round(confirm_elapsed, 2)
+            # ── FIRE-AND-FORGET: return immediately, verify in background ──
+            submit_elapsed = time.time() - sell_start
+            result["success"] = True  # Optimistic
+            result["tx_signature"] = signature
+            result["confirm_time_sec"] = round(submit_elapsed, 2)
+            result["sol_received"] = None  # Filled by backfill thread
+            _execution_metrics["sell_successes"] += 1
+            logger.info(f"[LIVE SELL SUBMITTED] {token_name}: tx={signature} submit_time={submit_elapsed:.1f}s (async verify)")
 
-            # Log timing metric
-            _execution_metrics["tx_confirm_times"].append(("sell", confirm_elapsed))
+            # Background verification thread
+            def _bg_verify_sell(_sig=signature, _tname=token_name, _mint=mint_address, _ptid=paper_trade_id, _start=sell_start, _sp=sell_pct):
+                try:
+                    confirmed, on_chain_error, sol_change = _verify_tx_on_chain(_sig)
+                    confirm_elapsed = time.time() - _start
+                    _execution_metrics["tx_confirm_times"].append(("sell", confirm_elapsed))
+                    if confirmed:
+                        if sol_change and sol_change > 0:
+                            global _total_sol_received
+                            _total_sol_received += sol_change
+                        logger.info(f"[LIVE SELL CONFIRMED] {_tname}: tx={_sig} sol_received={sol_change} confirm={confirm_elapsed:.1f}s")
+                        if _ptid is not None and sol_change is not None:
+                            try:
+                                from database import Database
+                                _db = Database()
+                                _db.update_live_trade_fill(paper_trade_id=_ptid, action="sell", sol_change=sol_change, slippage_pct=0)
+                            except Exception as e:
+                                logger.warning(f"[LIVE SELL FILL UPDATE FAILED] {_tname}: {e}")
+                    else:
+                        _execution_metrics["sell_successes"] -= 1
+                        _execution_metrics["sell_failures"] += 1
+                        logger.error(f"[LIVE SELL ON-CHAIN FAIL] {_tname}: {on_chain_error} tx={_sig}")
+                    if _sp == 100:
+                        _try_reclaim_rent(_mint, _tname)
+                except Exception as e:
+                    logger.warning(f"[LIVE SELL VERIFY ERROR] {_tname}: {e}")
 
-            if confirmed:
-                result["success"] = True
-                result["tx_signature"] = signature
-                result["sol_received"] = sol_change
-                if sol_change and sol_change > 0:
-                    _total_sol_received += sol_change
-                _execution_metrics["sell_successes"] += 1
-                
-                # Log slippage observation for sell
-                if sol_change is not None:
-                    _execution_metrics["slippage_observations"].append(("sell", None, sol_change))
-                
-                logger.info(f"[LIVE SELL SUCCESS] {token_name}: tx={signature} pool={pool} sol_change={sol_change} confirm={confirm_elapsed:.1f}s")
-                break
-            else:
-                # On-chain failure
-                last_error = on_chain_error
-                logger.warning(f"[LIVE SELL ON-CHAIN FAIL] {token_name}: {on_chain_error} pool={pool} tx={signature}")
-                
-                # If error 6024 (BondingCurveComplete), try next pool
-                if on_chain_error and "6024" in str(on_chain_error):
-                    logger.info(f"[LIVE SELL] Token migrated (6024), trying next pool...")
-                    _execution_metrics["sell_pool_retries"] += 1
-                    continue
-                else:
-                    # Other on-chain error, don't retry
-                    result["error"] = f"TX failed on-chain: {on_chain_error}"
-                    result["tx_signature"] = signature
-                    _execution_metrics["sell_failures"] += 1
-                    break
+            threading.Thread(target=_bg_verify_sell, daemon=True).start()
+
+            if paper_trade_id is not None:
+                _open_live_trades.discard(paper_trade_id)
+            result["pools_tried"] = pools_tried
+            return result
 
         except requests.exceptions.Timeout:
             last_error = "Request timed out (30s)"
