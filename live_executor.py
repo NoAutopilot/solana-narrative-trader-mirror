@@ -294,9 +294,9 @@ def passes_conviction_filter(trade_mode, twitter_signal=None, category=None):
         return True, "No filter"
     
     if filt == "narrative_only":
-        if trade_mode in ("narrative", "proactive"):
-            return True, "Narrative/proactive mode"
-        return False, f"Control trade filtered (mode={trade_mode})"
+        if trade_mode == "narrative":
+            return True, "Narrative mode"
+        return False, f"Non-narrative trade filtered (mode={trade_mode})"
     
     if filt == "high_conviction":
         # Must be narrative or proactive
