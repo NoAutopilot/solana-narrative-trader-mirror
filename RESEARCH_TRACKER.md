@@ -318,3 +318,57 @@ Consistent profitability WITHOUT relying on outlier moonshots. The base case (no
 - Use `getTransaction` with pre/post balance comparison as ground truth
 - Back up DB to GitHub before every session end
 - Document everything in RESEARCH_TRACKER — context loss from sandbox resets is the #1 risk
+
+---
+## SESSION 9 FINDINGS (Feb 23, 2026)
+
+### Live Experiment 2 Results
+- **Duration:** ~20 minutes (stopped for investigation)
+- **Wallet:** 0.6424 → 0.4984 SOL (-22.4%)
+- **Successful buys:** 32 | **Failed buys:** 2 | **Sell success:** 97%
+- **Moonshots captured live:** 0
+- **Status:** STOPPED — multiple bugs found
+
+### NEW FINDINGS
+
+#### F1: Phantom sell bug (P0 — FIXED)
+- **Bug:** Race condition between async buy verification and live_trade_map
+- **Impact:** Bot attempted to sell 32.15 SOL of tokens it never bought (Too Much Winning)
+- **Fix:** DB re-check before every live sell. If buy marked failed async, sell is blocked.
+- **Confidence:** HIGH — root cause identified and patched
+
+#### F2: Trailing TP destroys moonshot capture (P1 — TESTING)
+- **Data:** 69% of trailing_tp exits are losses. 199/280 peaked at 15-20% (noise).
+- **HENRY case:** Trailing TP exited at -8.4%, token went to +11,877%
+- **Hypothesis:** Time-gated exits (hold 0-45s, then trail wider) will capture more moonshots
+- **Status:** H_time_gated deployed as virtual strategy for parallel comparison
+- **What would prove it:** H_time_gated PnL > primary strategy PnL over 200+ trades
+
+#### F3: Paper PnL inflated by 80.5% (P2 — FLAGGED)
+- **Raw PnL:** 1,500.68 SOL
+- **Realistic PnL (500x cap):** 292.28 SOL
+- **Phantom exits (bonding curve cap):** 84 trades, zeroed out
+- **Capped trades (>500x):** 88 total
+- **Columns added:** phantom_exit, realistic_pnl_sol, platform
+
+#### F4: LaunchLab tokens untradeable (P3 — FLAGGED)
+- **Platform distribution:** pumpfun=3,946 | bonk=75 | other=1,013
+- **Other platform PnL:** +918 SOL raw, +47.53 SOL realistic
+- **PumpPortal cannot route to LaunchLab pools**
+
+### UPDATED: What's Proven vs Assumed
+
+| Claim | Status | Evidence |
+|---|---|---|
+| On-chain execution works | **PROVEN** | 94% buy, 97% sell success |
+| Trailing TP causes false exits | **PROVEN** | 69% of trailing_tp exits are losses |
+| Paper PnL is unreliable | **PROVEN** | 80.5% inflation from phantom/capped trades |
+| Time-gated exits are better | **TESTING** | H_time_gated virtual strategy deployed |
+| Moonshots capturable on-chain | **UNPROVEN** | 0 live moonshot captures |
+
+### WHAT WE'RE TESTING NOW
+| Test | Metric | Target | Current | ETA |
+|------|--------|--------|---------|-----|
+| H_time_gated vs primary | PnL comparison | H > primary | 9 exits, +5.27 SOL | 24-48 hrs |
+| Phantom sell fix | Zero phantom sells | 0 phantom sells | Just deployed | Next live test |
+| Realistic PnL tracking | Adjusted PnL stable | Consistent | Just deployed | 24 hrs |
