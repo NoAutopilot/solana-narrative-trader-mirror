@@ -344,6 +344,8 @@ def _check_experiment_timer():
 
 def can_execute_live():
     """Check all safety conditions before executing a live trade."""
+    if _emergency_halted:
+        return False, "EMERGENCY HALT ACTIVE"
     if not LIVE_ENABLED:
         return False, "Live trading disabled"
 
@@ -800,3 +802,87 @@ def get_live_stats():
         # Async verification status
         "pending_verifications": len(_pending_buy_verifications),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  EMERGENCY KILL SWITCH — halt buys + dump all open positions
+# ═══════════════════════════════════════════════════════════════════════════════
+_emergency_halted = False
+
+def emergency_kill_switch():
+    """
+    Emergency kill switch: immediately halt all new buys and sell all open positions.
+    Returns dict with results of each sell attempt.
+    """
+    global _emergency_halted, _live_halted_by_timer, LIVE_ENABLED
+    
+    _emergency_halted = True
+    _live_halted_by_timer = True  # Also trigger the timer halt
+    LIVE_ENABLED = False  # Disable live trading entirely
+    
+    logger.critical("[EMERGENCY] Kill switch activated! Halting all buys and dumping positions.")
+    
+    results = {
+        "halted": True,
+        "timestamp": datetime.utcnow().isoformat(),
+        "sells": [],
+        "errors": [],
+    }
+    
+    # Get all open live positions from DB
+    try:
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(__file__), "data", "solana_trader.db")
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        
+        # Find all open trades that have live buys
+        open_live = conn.execute("""
+            SELECT DISTINCT lt.mint_address, lt.token_name, t.id as paper_trade_id
+            FROM live_trades lt
+            JOIN trades t ON lt.paper_trade_id = t.id
+            WHERE t.status = 'open' 
+            AND UPPER(lt.action) = 'BUY' 
+            AND lt.success = 1
+            AND lt.paper_trade_id NOT IN (
+                SELECT paper_trade_id FROM live_trades 
+                WHERE UPPER(action) = 'SELL' AND success = 1
+            )
+        """).fetchall()
+        
+        conn.close()
+        
+        logger.critical(f"[EMERGENCY] Found {len(open_live)} open live positions to dump")
+        
+        for row in open_live:
+            mint = row["mint_address"]
+            name = row["token_name"]
+            paper_id = row["paper_trade_id"]
+            
+            logger.critical(f"[EMERGENCY] Selling {name} ({mint})")
+            try:
+                sell_result = execute_sell(
+                    mint_address=mint,
+                    token_name=name,
+                    sell_pct=100,
+                    paper_trade_id=paper_id
+                )
+                results["sells"].append({
+                    "mint": mint,
+                    "token_name": name,
+                    "success": sell_result.get("success", False),
+                    "tx": sell_result.get("tx_signature"),
+                    "error": sell_result.get("error"),
+                    "sol_received": sell_result.get("sol_received"),
+                })
+            except Exception as e:
+                logger.error(f"[EMERGENCY] Failed to sell {name}: {e}")
+                results["errors"].append({"mint": mint, "token_name": name, "error": str(e)})
+    except Exception as e:
+        logger.error(f"[EMERGENCY] DB error during kill switch: {e}")
+        results["errors"].append({"error": f"DB error: {str(e)}"})
+    
+    return results
+
+def is_emergency_halted():
+    return _emergency_halted

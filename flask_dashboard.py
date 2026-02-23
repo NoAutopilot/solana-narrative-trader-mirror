@@ -18,6 +18,15 @@ from flask import Flask, render_template_string, jsonify
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.config import DASHBOARD_PORT, DASHBOARD_HOST, DATA_DIR
 
+
+# Emergency kill switch
+try:
+    from live_executor import emergency_kill_switch, is_emergency_halted, get_live_stats
+except ImportError:
+    emergency_kill_switch = None
+    is_emergency_halted = lambda: False
+    get_live_stats = lambda: {}
+
 app = Flask(__name__)
 DB_PATH = os.path.join(DATA_DIR, "solana_trader.db")
 
@@ -231,6 +240,28 @@ def dashboard():
         recent_trades=recent, strategies=strategies, narratives=narratives,
     )
 
+
+
+@app.route("/api/emergency-kill", methods=["POST"])
+def api_emergency_kill():
+    """Emergency kill switch: halt all buys and dump all open positions."""
+    if emergency_kill_switch is None:
+        return {"error": "Kill switch not available"}, 500
+    try:
+        result = emergency_kill_switch()
+        return result
+    except Exception as e:
+        return {"error": str(e)}, 500
+
+@app.route("/api/live-status")
+def api_live_status():
+    """Get current live trading status."""
+    try:
+        stats = get_live_stats()
+        stats["emergency_halted"] = is_emergency_halted()
+        return stats
+    except Exception as e:
+        return {"error": str(e)}, 500
 
 @app.route("/api/stats")
 def api_stats():
