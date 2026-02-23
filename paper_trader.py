@@ -31,6 +31,7 @@ from config.config import (
     CONTROL_SAMPLE_RATE, TAKE_PROFIT_PCT, STOP_LOSS_PCT,
     TIMEOUT_MINUTES, PRICE_CHECK_INTERVAL, TRAILING_TP_ACTIVATE,
     TRAILING_TP_DISTANCE, VIRTUAL_STRATEGIES, DEXSCREENER_API_URL,
+
     FEE_BUY_PCT, FEE_SELL_PCT, MIN_MATCH_SCORE,
     RUG_MIN_LIQUIDITY_SOL, RUG_MAX_DEV_HOLDING_PCT,
     DATA_DIR, LOGS_DIR
@@ -415,19 +416,14 @@ def check_exit(trade_info, current_price_sol):
     entry_price = trade_info["entry_price_sol"]
     if entry_price <= 0 or current_price_sol is None:
         return False, None, 0
-
     gross_pnl_pct = (current_price_sol - entry_price) / entry_price
     net_pnl_pct = gross_pnl_pct - FEE_BUY_PCT - FEE_SELL_PCT
-
     if current_price_sol > trade_info["peak_price_sol"]:
         trade_info["peak_price_sol"] = current_price_sol
-
     if net_pnl_pct >= TAKE_PROFIT_PCT:
         return True, "take_profit", net_pnl_pct
-
     if net_pnl_pct <= STOP_LOSS_PCT:
         return True, "stop_loss", net_pnl_pct
-
     if gross_pnl_pct >= TRAILING_TP_ACTIVATE:
         trade_info["trailing_active"] = True
     if trade_info["trailing_active"]:
@@ -435,13 +431,14 @@ def check_exit(trade_info, current_price_sol):
         dd = (current_price_sol - peak) / peak
         if dd <= -TRAILING_TP_DISTANCE:
             return True, "trailing_tp", net_pnl_pct
-
     age = (datetime.utcnow() - trade_info["entry_time"]).total_seconds()
     if age >= TIMEOUT_MINUTES * 60:
         return True, "timeout", net_pnl_pct
-
     return False, None, net_pnl_pct
 
+class _PhantomSellBlocked(Exception):
+    """Raised when a phantom sell is blocked by DB re-check."""
+    pass
 
 def close_trade(trade_id, trade_info, exit_reason, pnl_pct, current_price_sol):
     """Close a trade and log the exit."""
@@ -470,6 +467,30 @@ def close_trade(trade_id, trade_info, exit_reason, pnl_pct, current_price_sol):
     # ── LIVE SELL (if we have a live position) ──
     try:
         if trade_id in live_trade_map:
+            # v5.0 P0 FIX: Re-check DB before selling to catch async buy failures
+            # Background verification may have marked buy as failed after live_trade_map was set
+            try:
+                import sqlite3 as _sq3_check
+                from config.config import DB_PATH as _db_check_path
+                _check_conn = _sq3_check.connect(_db_check_path)
+                _buy_row = _check_conn.execute(
+                    "SELECT success FROM live_trades WHERE paper_trade_id = ? AND UPPER(action) = 'BUY'",
+                    (trade_id,)
+                ).fetchone()
+                _check_conn.close()
+                if _buy_row and _buy_row[0] != 1:
+                    logger.warning(
+                        f"[PHANTOM SELL BLOCKED] {trade_info['name']}: buy was marked failed "
+                        f"by async verification (success={_buy_row[0]}). Skipping live sell."
+                    )
+                    del live_trade_map[trade_id]
+                    # Skip the sell entirely — jump to cleanup
+                    raise _PhantomSellBlocked()
+            except _PhantomSellBlocked:
+                raise
+            except Exception as _check_err:
+                logger.warning(f"[PHANTOM SELL CHECK] DB check failed: {_check_err}, proceeding with sell")
+            
             live_buy = live_trade_map[trade_id]
             sell_result = execute_sell(
                 mint_address=trade_info["mint"],
@@ -514,6 +535,8 @@ def close_trade(trade_id, trade_info, exit_reason, pnl_pct, current_price_sol):
             else:
                 logger.warning(f"[LIVE SELL FAILED] {trade_info['name']}: {sell_result.get('error')}")
             del live_trade_map[trade_id]
+    except _PhantomSellBlocked:
+        pass  # Already logged — sell was correctly skipped
     except Exception as e:
         logger.error(f"[LIVE SELL ERROR] {trade_info['name']}: {e}")
 
@@ -550,6 +573,36 @@ def check_virtual_exits(trade_id, trade_info, current_price_sol):
             exit_reason = "take_profit"
         elif net_pnl_pct <= params["sl"]:
             exit_reason = "stop_loss"
+        elif params.get("time_gated"):
+            # H_time_gated: phase-specific SL and trailing TP
+            p = params  # shorthand
+            if age_sec < p["phase1_end"]:
+                # Phase 1: Formation window — only catastrophic SL
+                if net_pnl_pct <= p["phase1_sl"]:
+                    exit_reason = "stop_loss"
+            elif age_sec < p["phase2_end"]:
+                # Phase 2: Wide trailing
+                if net_pnl_pct <= p["phase2_sl"]:
+                    exit_reason = "stop_loss"
+                elif gross_pnl_pct >= p["phase2_trail_act"]:
+                    strat_state["trailing_active"] = True
+                if strat_state["trailing_active"] and not exit_reason:
+                    peak = strat_state["peak_price"]
+                    dd = (current_price_sol - peak) / peak
+                    if dd <= -p["phase2_trail_dist"]:
+                        exit_reason = "trailing_tp"
+            elif age_sec < p["phase3_end"]:
+                # Phase 3: Tighter trailing
+                if net_pnl_pct <= p["phase3_sl"]:
+                    exit_reason = "stop_loss"
+                elif gross_pnl_pct >= p["phase3_trail_act"]:
+                    strat_state["trailing_active"] = True
+                if strat_state["trailing_active"] and not exit_reason:
+                    peak = strat_state["peak_price"]
+                    dd = (current_price_sol - peak) / peak
+                    if dd <= -p["phase3_trail_dist"]:
+                        exit_reason = "trailing_tp"
+            # Phase 4: timeout handled below
         elif params.get("trailing"):
             if gross_pnl_pct >= TRAILING_TP_ACTIVATE:
                 strat_state["trailing_active"] = True
@@ -558,7 +611,6 @@ def check_virtual_exits(trade_id, trade_info, current_price_sol):
                 dd = (current_price_sol - peak) / peak
                 if dd <= -TRAILING_TP_DISTANCE:
                     exit_reason = "trailing_tp"
-
         if age_sec >= params["timeout"] * 60:
             exit_reason = exit_reason or "timeout"
 

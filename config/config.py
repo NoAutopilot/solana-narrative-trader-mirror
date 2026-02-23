@@ -81,8 +81,8 @@ TIMEOUT_MINUTES      = 2       # Close after 2 min (data: 100% winners close <2m
 PRICE_CHECK_INTERVAL = 10      # Seconds between price checks for open trades
 
 # ── Trailing Take Profit ─────────────────────────────────────────────────────
-TRAILING_TP_ACTIVATE = 0.15  # Activate trailing TP at 15% gross gain    # Activate trailing TP at 20% profit
-TRAILING_TP_DISTANCE = 0.08  # Trail 8% behind peak (tighter = captures more)    # Trail 10% behind peak
+TRAILING_TP_ACTIVATE = 0.15  # Activate trailing TP at 15% gross gain
+TRAILING_TP_DISTANCE = 0.08  # Trail 8% behind peak
 
 # ── Virtual Exit Strategies ──────────────────────────────────────────────────
 VIRTUAL_STRATEGIES = {
@@ -93,6 +93,10 @@ VIRTUAL_STRATEGIES = {
     "E_long_hold":      {"tp": 0.50, "sl": -0.30, "timeout": 10},
     "F_trailing_only":  {"tp": 1.00, "sl": -0.20, "timeout": 5, "trailing": True},
     "G_diamond_hands":  {"tp": 1.00, "sl": -0.35, "timeout": 10, "trailing": True},
+    "H_time_gated":    {"tp": 100.0, "sl": -0.50, "timeout": 2.5, "time_gated": True,
+                         "phase1_end": 45, "phase1_sl": -0.50,
+                         "phase2_end": 90, "phase2_trail_act": 0.50, "phase2_trail_dist": 0.25, "phase2_sl": -0.30,
+                         "phase3_end": 150, "phase3_trail_act": 0.30, "phase3_trail_dist": 0.15, "phase3_sl": -0.25},
 }
 
 # ── Rug Filter Thresholds ───────────────────────────────────────────────────
