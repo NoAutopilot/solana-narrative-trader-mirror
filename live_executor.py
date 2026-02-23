@@ -11,6 +11,11 @@ v3.2: Async buy verification — TX submits in ~1-2s, verification runs in backg
 v4.0: Smart pool routing — detects token platform from mint suffix and routes to
      optimal pool. Adds bonk pool for letsbonk.fun tokens, auto fallback for
      unknown platforms. Fixes 100% of bonk failures and Sol Refunds-type failures.
+v4.1: Fix phantom buy bug — when async verification detects on-chain buy failure,
+     now updates DB success=0 (was only updating in-memory metrics). Prevents
+     stuck positions where sell attempts fail with error 6022 (SellZeroAmount)
+     because no tokens were actually received. Also adds 6022/6023 to known
+     error codes for better diagnostics.
 """
 
 import os
@@ -200,11 +205,15 @@ def _parse_on_chain_error(err):
         if isinstance(detail, dict) and "Custom" in detail:
             code = detail["Custom"]
             known_errors = {
-                6024: "BondingCurveComplete — token migrated to AMM",
                 6000: "NotAuthorized",
                 6001: "AlreadyInitialized",
                 6003: "TooMuchSolRequired",
                 6004: "TooLittleSolReceived",
+                6005: "MinSell — sell amount below minimum",
+                6006: "BondingCurveNotComplete",
+                6022: "SellZeroAmount — wallet has 0 tokens (buy likely failed)",
+                6023: "NotEnoughTokensToSell",
+                6024: "BondingCurveComplete — token migrated to AMM",
             }
             desc = known_errors.get(code, f"Custom error {code}")
             return f"InstructionError[{idx}]: {desc}"
@@ -569,12 +578,27 @@ def execute_buy(mint_address, token_name="", amount_sol=None, paper_trade_id=Non
                     logger.info(f"[LIVE BUY VERIFIED] {token_name}: confirmed={confirmed} sol_change={sol_change:.6f} slippage={slippage_pct:+.1f}% confirm={confirm_elapsed:.1f}s")
                 
                 if not confirmed:
-                    # TX failed on-chain — log it, adjust metrics
+                    # TX failed on-chain — log it, adjust metrics, AND update DB
                     _execution_metrics["buy_successes"] -= 1
                     _execution_metrics["buy_failures"] += 1
                     if paper_trade_id is not None:
                         _open_live_trades.discard(paper_trade_id)
                     logger.error(f"[LIVE BUY ON-CHAIN FAIL] {token_name}: {on_chain_error} tx={signature} (detected async)")
+                    # v4.1: Mark DB record as failed so rebuild_live_trade_map won't pick it up
+                    if paper_trade_id is not None:
+                        try:
+                            import sqlite3 as _sq3
+                            from config.config import DB_PATH as _dbp
+                            _conn = _sq3.connect(_dbp)
+                            _conn.execute(
+                                "UPDATE live_trades SET success = 0, error = ? WHERE paper_trade_id = ? AND UPPER(action) = 'BUY'",
+                                (f"On-chain fail: {on_chain_error}", paper_trade_id)
+                            )
+                            _conn.commit()
+                            _conn.close()
+                            logger.info(f"[LIVE BUY DB UPDATED] {token_name}: marked success=0 in DB (ptid={paper_trade_id})")
+                        except Exception as _dbe:
+                            logger.warning(f"[LIVE BUY DB UPDATE FAILED] {token_name}: {_dbe}")
                 else:
                     logger.info(f"[LIVE BUY CONFIRMED] {token_name}: tx={signature} confirm={confirm_elapsed:.1f}s sol_change={sol_change}")
                     # Update DB with actual on-chain fill data
@@ -687,6 +711,14 @@ def execute_sell(mint_address, token_name="", sell_pct=100, paper_trade_id=None)
             )
 
             if api_error:
+                # v4.1: If error is SellZeroAmount (6022) or NotEnoughTokens (6023),
+                # don't retry other pools — the wallet has no tokens to sell.
+                # This happens when the buy TX failed on-chain but was optimistically marked success.
+                if "6022" in str(api_error) or "6023" in str(api_error) or "SellZeroAmount" in str(api_error):
+                    result["error"] = f"No tokens to sell (buy likely failed on-chain): {api_error}"
+                    _execution_metrics["sell_failures"] += 1
+                    logger.error(f"[LIVE SELL ABORT] {token_name}: {api_error} — no tokens in wallet, skipping remaining pools")
+                    break
                 # API-level error (pool not found, etc.) — try next pool
                 last_error = api_error
                 _execution_metrics["sell_pool_retries"] += 1
