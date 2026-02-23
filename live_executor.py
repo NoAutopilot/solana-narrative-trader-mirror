@@ -597,11 +597,11 @@ def _try_reclaim_rent(mint_address, token_name=""):
                 logger.info(f"[RENT RECLAIM] {token_name}: recovered {rent_sol:.6f} SOL — tx={result}")
                 return rent_sol
             else:
-                logger.debug(f"[RENT RECLAIM] {token_name}: failed — {result}")
+                logger.info(f"[RENT RECLAIM] {token_name}: failed — {result}")
         elif acc:
-            logger.debug(f"[RENT RECLAIM] {token_name}: account not empty yet (amount={acc['amount']})")
+            logger.info(f"[RENT RECLAIM] {token_name}: account not empty yet (amount={acc['amount']})")
     except Exception as e:
-        logger.debug(f"[RENT RECLAIM] {token_name}: error — {e}")
+        logger.info(f"[RENT RECLAIM] {token_name}: error — {e}")
     return 0.0
 
 
