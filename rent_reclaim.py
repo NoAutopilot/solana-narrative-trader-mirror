@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 # Config
 HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "")
-WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
+WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "") or os.getenv("SOLANA_PRIVATE_KEY", "")
 
 TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
