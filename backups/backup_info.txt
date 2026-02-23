@@ -1,11 +1,11 @@
-Backup Timestamp: 2026-02-23 06:45:43 UTC
+Backup Timestamp: 2026-02-23 07:00:01 UTC
 Source: /root/solana_trader/data/solana_trader.db
-File Size: 495616 bytes
+File Size: 524288 bytes
 
 Database Stats:
-  Total Trades: 392
-  Open Trades: 7
-  Closed Trades: 385
+  Total Trades: 424
+  Open Trades: 3
+  Closed Trades: 421
   Live Trades: 0
-  Narratives: 160
-  Total Paper PnL: 10.0572 SOL
+  Narratives: 163
+  Total Paper PnL: 10.1852 SOL
