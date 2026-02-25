@@ -37,6 +37,26 @@ MANAGED_PROCESSES = {
         "restart_delay": 10,
         "max_restarts_per_hour": 10,
     },
+    "et_universe_scanner": {
+        "cmd": [sys.executable, os.path.join(BASE_DIR, "et_universe_scanner.py")],
+        "restart_delay": 15,
+        "max_restarts_per_hour": 6,
+    },
+    "et_microstructure": {
+        "cmd": [sys.executable, os.path.join(BASE_DIR, "et_microstructure.py")],
+        "restart_delay": 15,
+        "max_restarts_per_hour": 6,
+    },
+    "et_shadow_trader_v1": {
+        "cmd": [sys.executable, os.path.join(BASE_DIR, "et_shadow_trader_v1.py")],
+        "restart_delay": 15,
+        "max_restarts_per_hour": 6,
+    },
+    "pf_graduation_stream": {
+        "cmd": [sys.executable, os.path.join(BASE_DIR, "pf_graduation_stream.py")],
+        "restart_delay": 20,
+        "max_restarts_per_hour": 6,
+    },
     "flask_dashboard": {
         "cmd": [sys.executable, os.path.join(BASE_DIR, "flask_dashboard.py")],
         "restart_delay": 5,

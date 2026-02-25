@@ -96,6 +96,15 @@ TRADE_SIZE_SOL              = 0.01
 MAX_OPEN_PER_STRATEGY       = 1
 MAX_OPEN_GLOBAL             = 1          # only enforced in live_sim_mode
 LP_CLIFF_THRESHOLD          = 0.05       # 5% k-drop triggers liq_cliff exit
+# ── SCORE/RANK FALLBACK ───────────────────────────────────────────────────────
+# When no strict-threshold signals fire within SCORE_RANK_INTERVAL_SEC,
+# fire 1 trade per strategy using the top-ranked candidate.
+# This prevents signal starvation and ensures minimum sample size.
+SCORE_RANK_ENABLED          = True
+SCORE_RANK_INTERVAL_SEC     = 3600       # 1 hour between forced rank entries
+SCORE_RANK_MIN_R_M5         = 0.0        # must have at least some positive momentum
+SCORE_RANK_MIN_BUY_RATIO    = 0.40       # relaxed buy ratio floor
+SCORE_RANK_MIN_VOL_ACCEL    = 0.5        # relaxed vol accel floor
 FRICTION_GATE_MAX_RT        = 0.010      # 1.0% max total RT friction (Jupiter-quoted)
 DEXSCREENER_TIMEOUT         = 12
 WSOL_MINT                   = "So11111111111111111111111111111111111111112"
@@ -120,6 +129,10 @@ PULLBACK_CONFIRM_R_M5_MIN   = -0.3       # confirmation: r_m5 must recover to >=
 
 # Pullback pending confirmation: {mint: timestamp_of_initial_signal}
 _pullback_pending: dict[str, float] = {}
+# Score/rank fallback: track last time each strategy fired a rank entry
+_last_rank_entry: dict[str, float] = {}
+# Jupiter API availability (set to False on first 401 to avoid repeated failures)
+_jupiter_api_available: bool = True
 PULLBACK_CONFIRM_WINDOW_SEC = 75         # ~1 scan cycle + buffer
 
 # ── DB HELPERS ────────────────────────────────────────────────────────────────
@@ -231,51 +244,70 @@ def get_latest_microstructure() -> list[dict]:
     return [dict(r) for r in rows]
 
 # ── JUPITER FRICTION GATE ─────────────────────────────────────────────────────
-def get_jupiter_rt_estimate(mint: str) -> float | None:
+def get_jupiter_rt_estimate(mint: str, liq_base: float = 0, liq_quote_sol: float = 0) -> float | None:
     """
     Returns total RT friction fraction (e.g. 0.008 = 0.8%) or None if no route.
-    None means: abort entry (route risk).
+    Falls back to CPAMM math when Jupiter API is unavailable (401 / network error).
     """
+    global _jupiter_api_available
     sol_in_lamports = int(TRADE_SIZE_SOL * LAMPORTS_PER_SOL)
-    try:
-        r_buy = requests.get(
-            f"{JUPITER_BASE_URL}/v6/quote",
-            params={
-                "inputMint":   WSOL_MINT,
-                "outputMint":  mint,
-                "amount":      str(sol_in_lamports),
-                "slippageBps": "50",
-            },
-            headers={"Authorization": f"Bearer {JUPITER_API_KEY}"},
-            timeout=8,
-        )
-        buy_q = r_buy.json()
-        if "outAmount" not in buy_q:
-            return None
-        tokens_out = int(buy_q["outAmount"])
-        if tokens_out <= 0:
-            return None
 
-        r_sell = requests.get(
-            f"{JUPITER_BASE_URL}/v6/quote",
-            params={
-                "inputMint":   mint,
-                "outputMint":  WSOL_MINT,
-                "amount":      str(tokens_out),
-                "slippageBps": "50",
-            },
-            headers={"Authorization": f"Bearer {JUPITER_API_KEY}"},
-            timeout=8,
-        )
-        sell_q = r_sell.json()
-        if "outAmount" not in sell_q:
-            return None
-        sol_back_lamports = int(sell_q["outAmount"])
-        rt_friction = 1.0 - (sol_back_lamports / sol_in_lamports)
-        return max(0.0, rt_friction)
-    except Exception as e:
-        logger.warning(f"Jupiter RT estimate failed for {mint[:8]}: {e}")
-        return None
+    if _jupiter_api_available:
+        try:
+            r_buy = requests.get(
+                f"{JUPITER_BASE_URL}/v6/quote",
+                params={
+                    "inputMint":   WSOL_MINT,
+                    "outputMint":  mint,
+                    "amount":      str(sol_in_lamports),
+                    "slippageBps": "50",
+                },
+                headers={"Authorization": f"Bearer {JUPITER_API_KEY}"},
+                timeout=8,
+            )
+            if r_buy.status_code == 401:
+                logger.warning("Jupiter API 401 — switching to CPAMM fallback mode")
+                _jupiter_api_available = False
+            else:
+                buy_q = r_buy.json()
+                if "outAmount" not in buy_q:
+                    return None
+                tokens_out = int(buy_q["outAmount"])
+                if tokens_out <= 0:
+                    return None
+                r_sell = requests.get(
+                    f"{JUPITER_BASE_URL}/v6/quote",
+                    params={
+                        "inputMint":   mint,
+                        "outputMint":  WSOL_MINT,
+                        "amount":      str(tokens_out),
+                        "slippageBps": "50",
+                    },
+                    headers={"Authorization": f"Bearer {JUPITER_API_KEY}"},
+                    timeout=8,
+                )
+                if r_sell.status_code == 401:
+                    logger.warning("Jupiter API 401 on sell — switching to CPAMM fallback")
+                    _jupiter_api_available = False
+                else:
+                    sell_q = r_sell.json()
+                    if "outAmount" not in sell_q:
+                        return None
+                    sol_back_lamports = int(sell_q["outAmount"])
+                    rt_friction = 1.0 - (sol_back_lamports / sol_in_lamports)
+                    return max(0.0, rt_friction)
+        except Exception as e:
+            logger.warning(f"Jupiter RT estimate failed for {mint[:8]}: {e}")
+
+    # CPAMM fallback: use CPAMM math + fixed DEX fee estimate (0.6%)
+    if liq_base > 0 and liq_quote_sol > 0:
+        rt = cpamm_round_trip(TRADE_SIZE_SOL, liq_base, liq_quote_sol)
+        cpamm_rt = rt["total_friction"] + 0.006
+        logger.debug(f"CPAMM fallback RT for {mint[:8]}: {cpamm_rt*100:.2f}%")
+        return min(cpamm_rt, 0.05)
+    else:
+        # No liquidity data — conservative estimate
+        return 0.008
 
 # ── PRICE FETCH ───────────────────────────────────────────────────────────────
 def fetch_current_price(mint: str) -> dict | None:
@@ -336,6 +368,71 @@ def should_confirm_pullback(row: dict) -> bool:
         (row.get("buy_count_ratio_m5") or 0)  >= PULLBACK_BUY_RATIO_MIN
     )
 
+# ── SCORE/RANK FALLBACK ──────────────────────────────────────────────────────
+def score_momentum(row: dict) -> float:
+    """Composite momentum score. Higher = better candidate."""
+    r_m5      = max(row.get("r_m5") or 0, 0)
+    buy_ratio = max(row.get("buy_count_ratio_m5") or 0, 0)
+    vol_accel = max(row.get("vol_accel_m5_vs_h1") or 0, 0)
+    avg_trade = max(row.get("avg_trade_usd_m5") or 0, 0)
+    # Normalize avg_trade (cap at $500 to avoid outlier dominance)
+    avg_norm = min(avg_trade, 500) / 500
+    return r_m5 * buy_ratio * vol_accel * (0.5 + 0.5 * avg_norm)
+
+def score_pullback(row: dict) -> float:
+    """Composite pullback score. Higher = better candidate."""
+    r_h1      = max(row.get("r_h1") or 0, 0)
+    r_m5_neg  = max(-(row.get("r_m5") or 0), 0)  # want r_m5 to be negative
+    buy_ratio = max(row.get("buy_count_ratio_m5") or 0, 0)
+    return r_h1 * r_m5_neg * buy_ratio
+
+def maybe_fire_rank_entry(strategy: str, rows: list[dict], score_fn) -> str | None:
+    """
+    If SCORE_RANK_ENABLED and no strict-threshold entry has fired for this
+    strategy in SCORE_RANK_INTERVAL_SEC, fire a rank entry using the top
+    candidate by score_fn.
+    Returns trade_id on success, None otherwise.
+    """
+    if not SCORE_RANK_ENABLED:
+        return None
+    now = time.time()
+    last = _last_rank_entry.get(strategy, 0)
+    if now - last < SCORE_RANK_INTERVAL_SEC:
+        return None  # Not time yet
+    # Filter to minimally qualifying candidates
+    if strategy == "momentum_rank":
+        candidates = [
+            r for r in rows
+            if (r.get("r_m5") or 0) >= SCORE_RANK_MIN_R_M5
+            and (r.get("buy_count_ratio_m5") or 0) >= SCORE_RANK_MIN_BUY_RATIO
+            and (r.get("vol_accel_m5_vs_h1") or 0) >= SCORE_RANK_MIN_VOL_ACCEL
+        ]
+    else:  # pullback_rank
+        candidates = [
+            r for r in rows
+            if (r.get("r_h1") or 0) >= 0.5  # at least some h1 gain
+            and (r.get("r_m5") or 0) <= 0   # currently dipping
+            and (r.get("buy_count_ratio_m5") or 0) >= SCORE_RANK_MIN_BUY_RATIO
+        ]
+    if not candidates:
+        logger.info(f"RANK {strategy}: no qualifying candidates this cycle, skipping")
+        return None
+    # Pick top candidate by score
+    best = max(candidates, key=score_fn)
+    best_score = score_fn(best)
+    logger.info(
+        f"RANK {strategy}: firing top-1 candidate "
+        f"{best.get('token_symbol','?')} ({best.get('mint_address','?')[:8]}) "
+        f"score={best_score:.4f} "
+        f"r_m5={best.get('r_m5'):.2f}% r_h1={best.get('r_h1'):.2f}% "
+        f"buy_ratio={best.get('buy_count_ratio_m5'):.2f}"
+    )
+    tid = open_trade(strategy, best)
+    if tid:
+        _last_rank_entry[strategy] = now
+        logger.info(f"RANK {strategy}: entry opened trade_id={tid[:8]}")
+    return tid
+
 # ── OPEN TRADE ────────────────────────────────────────────────────────────────
 def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None) -> str | None:
     """
@@ -348,7 +445,9 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
 
     mint = row["mint_address"]
 
-    jup_rt = get_jupiter_rt_estimate(mint)
+    liq_b_for_jup = row.get("liq_base") or 0
+    liq_q_for_jup = row.get("liq_quote_sol") or 0
+    jup_rt = get_jupiter_rt_estimate(mint, liq_b_for_jup, liq_q_for_jup)
     if jup_rt is None:
         logger.info(f"SKIP {strategy} {mint[:8]}: no Jupiter route")
         return None
@@ -581,6 +680,14 @@ def run():
 
         except Exception as e:
             logger.error(f"Main loop error: {e}", exc_info=True)
+
+        # ── Score/Rank Fallback (fires at most 1/hour per strategy) ──
+        if SCORE_RANK_ENABLED and rows:
+            try:
+                maybe_fire_rank_entry("momentum_rank", rows, score_momentum)
+                maybe_fire_rank_entry("pullback_rank", rows, score_pullback)
+            except Exception as rank_e:
+                logger.error(f"Score/rank error: {rank_e}", exc_info=True)
 
         elapsed = time.time() - loop_start
         time.sleep(max(2, POLL_INTERVAL_SEC - elapsed))

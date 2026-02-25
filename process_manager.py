@@ -21,7 +21,7 @@ LOGFILE = WORKDIR / 'logs' / 'process_manager.log'
 SERVICES = [
     ('et_universe_scanner', 'et_universe_scanner.py', 'logs/et_universe_scanner.log'),
     ('et_microstructure',   'et_microstructure.py',   'logs/et_microstructure.log'),
-    ('et_shadow_trader',    'et_shadow_trader.py',     'logs/et_shadow_trader.log'),
+    ('et_shadow_trader_v1',  'et_shadow_trader_v1.py',  'logs/et_shadow_trader_v1.log'),
     ('pf_graduation_stream','pf_graduation_stream.py', 'logs/pf_graduation_stream.log'),
 ]
 

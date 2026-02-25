@@ -69,6 +69,12 @@ CATEGORY_KEYWORDS = {
                   "nvidia", "chip", "semiconductor", "quantum", "robot"],
 }
 
+# ── Category Filter ─────────────────────────────────────────────────────────
+# Categories with insufficient edge — excluded from proactive live trading
+# celebrity: 6.2% win rate across 64 trades (Session 9 analysis)
+# sports: 0.0% win rate across 4 trades (Session 9 analysis)
+BLOCKED_CATEGORIES = ["celebrity", "sports"]
+
 # ── Trading Parameters ───────────────────────────────────────────────────────
 TRADE_SIZE_SOL       = 0.04    # SOL per trade (paper)
 MAX_CONCURRENT_TRADES = 50     # Max open positions
@@ -77,7 +83,7 @@ CONTROL_SAMPLE_RATE  = 0.15    # 15% of non-narrative tokens enter as control
 # ── Exit Strategy (default) ──────────────────────────────────────────────────
 TAKE_PROFIT_PCT = 100.0  # Effectively disabled — let trailing TP handle moonshots    # 30% take profit
 STOP_LOSS_PCT        = -0.25   # 25% stop loss
-TIMEOUT_MINUTES      = 2       # Close after 2 min (data: 100% winners close <2min, 96% of TP profit in <1min; saves capital)
+TIMEOUT_MINUTES      = 1       # Close after 1 min (Session 9: 47% win rate in 30-60s, drops to 7% after 2min)
 PRICE_CHECK_INTERVAL = 10      # Seconds between price checks for open trades
 
 # ── Trailing Take Profit ─────────────────────────────────────────────────────
@@ -97,6 +103,8 @@ VIRTUAL_STRATEGIES = {
                          "phase1_end": 45, "phase1_sl": -0.50,
                          "phase2_end": 90, "phase2_trail_act": 0.50, "phase2_trail_dist": 0.25, "phase2_sl": -0.30,
                          "phase3_end": 150, "phase3_trail_act": 0.30, "phase3_trail_dist": 0.15, "phase3_sl": -0.25},
+    "I_letsbonk":      {"tp": 1.00, "sl": -0.25, "timeout": 1.5, "trailing": True,
+                         "note": "letsbonk.fun platform filter — 85.7% win rate n=7 Session 9"},
 }
 
 # ── Rug Filter Thresholds ───────────────────────────────────────────────────
@@ -117,3 +125,13 @@ TOTAL_FEE_PCT = FEE_BUY_PCT + FEE_SELL_PCT  # 8% round trip
 # ── Flask Dashboard ──────────────────────────────────────────────────────────
 DASHBOARD_PORT = 5050
 DASHBOARD_HOST = "0.0.0.0"
+
+# Jupiter API
+JUPITER_API_KEY = "REDACTED_JUPITER_API_KEY"
+JUPITER_BASE_URL = "https://api.jup.ag"
+
+# ── Live Trading Credentials (loaded from environment) ──────────────────────
+import os as _os
+RPC_URL             = _os.getenv('HELIUS_RPC_URL', '')
+WALLET_PRIVATE_KEY  = _os.getenv('WALLET_PRIVATE_KEY', '')
+WALLET_PUBKEY       = _os.getenv('WALLET_PUBKEY', '')
