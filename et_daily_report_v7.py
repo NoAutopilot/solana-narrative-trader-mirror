@@ -14,6 +14,7 @@ Changes from v5:
     with poll-gap overshoot flag if |pnl| >> SL threshold
   - Smoke test meta_fee backfill: fetches RPC meta.fee for buy/sell sigs if not stored
 """
+import argparse
 import sqlite3
 import sys
 import subprocess
@@ -26,7 +27,10 @@ from statistics import mean, stdev
 sys.path.insert(0, '/root/solana_trader')
 from config.config import DB_PATH
 
-hours = 24
+_parser = argparse.ArgumentParser(description="ET v1 Daily Readiness Report")
+_parser.add_argument("--hours", type=int, default=24, help="Lookback window in hours (default: 24)")
+_args = _parser.parse_args()
+hours = _args.hours
 MIN_TRADES_PER_STRATEGY = 20
 MIN_STABLE_BLOCKS       = 2
 SL_THRESHOLD_PCT        = -0.02   # -2% SL — trades worse than 2x this are poll-gap suspects
@@ -94,7 +98,7 @@ def main():
     conn.row_factory = sqlite3.Row
 
     print("=" * 72)
-    print("ET v1 DAILY READINESS REPORT  (v7 — decision-grade)")
+    print("ET v1 DAILY READINESS REPORT  (v7.1 — lane-separated)")
     print(f"Window: last {hours}h | Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
     print("Source: shadow_trades_v1 | Strategies: strict + rank variants")
     print("=" * 72)
@@ -806,6 +810,50 @@ def main():
         print(f"    Blocking: {', '.join(failed_items)}")
         print("    Continue paper trading. Do not deploy live funds.")
     print("=" * 72)
+
+    # ── 12b. LANE-SEPARATED PAIRED DELTA ─────────────────────────────────────
+    print("\n" + "─" * 72)
+    print("LANE-SEPARATED PAIRED DELTA  (strategy vs matched baseline, by lane)")
+    print("─" * 72)
+    print("  Lanes: large_cap | mature_raydium | mature_pumpswap")
+    print("  Hard gates enforced: age>=4h, liq>=$100k, vol24h>=$250k")
+    try:
+        lanes = conn.execute("""
+            SELECT DISTINCT lane FROM shadow_trades_v1
+            WHERE lane IS NOT NULL AND status='closed'
+            ORDER BY lane
+        """).fetchall()
+        lanes = [r[0] for r in lanes]
+        if not lanes:
+            print("  No lane-tagged trades yet (new column — accumulating)")
+        else:
+            for lane_name in lanes:
+                print(f"\n  LANE: {lane_name.upper()}")
+                for strat, baseline_strat in strategy_pairs:
+                    pairs = conn.execute("""
+                        SELECT s.shadow_pnl_pct_fee060, b.shadow_pnl_pct_fee060,
+                               s.shadow_pnl_pct_fee100, b.shadow_pnl_pct_fee100
+                        FROM shadow_trades_v1 s
+                        JOIN shadow_trades_v1 b ON b.baseline_trigger_id = s.trade_id
+                        WHERE s.strategy = ? AND b.strategy = ?
+                          AND s.lane = ?
+                          AND s.status = 'closed' AND b.status = 'closed'
+                          AND s.exited_at >= ?
+                    """, (strat, baseline_strat, lane_name, since)).fetchall()
+                    n_pairs = len([r for r in pairs if r[0] is not None and r[1] is not None])
+                    if n_pairs < 3:
+                        print(f"    {strat:<32} vs baseline: n_pairs={n_pairs} (need >=3)")
+                        continue
+                    d060 = [(r[0] - r[1]) * 100 for r in pairs if r[0] is not None and r[1] is not None]
+                    d100 = [(r[2] - r[3]) * 100 for r in pairs if r[2] is not None and r[3] is not None]
+                    m060, lo060, hi060 = bootstrap_ci(d060)
+                    m100, lo100, hi100 = bootstrap_ci(d100)
+                    ci060 = f"[{lo060:+.3f}%, {hi060:+.3f}%]" if lo060 is not None else "N/A"
+                    ci100 = f"[{lo100:+.3f}%, {hi100:+.3f}%]" if lo100 is not None else "N/A"
+                    verdict = "BEATS" if (m060 is not None and m060 > 0) else "LAGS"
+                    print(f"    {strat:<32} n={n_pairs:<3} delta060={m060:+.3f}% {ci060}  delta100={m100:+.3f}%  [{verdict}]")
+    except Exception as e:
+        print(f"  lane-separated section error: {e}")
 
     # ── 13. LEGACY ────────────────────────────────────────────────────────────
     print("\n" + "─" * 72)

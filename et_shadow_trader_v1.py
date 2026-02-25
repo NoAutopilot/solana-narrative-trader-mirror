@@ -220,11 +220,35 @@ def init_tables():
         shadow_pnl_pct_fee060   REAL,
         shadow_pnl_pct_fee100   REAL,
         mode                    TEXT,
-        status                  TEXT    DEFAULT 'open'
+        status                  TEXT    DEFAULT 'open',
+        -- Lane tagging (v1.6)
+        lane                    TEXT,   -- mature_raydium | mature_pumpswap | fresh_pumpswap | large_cap
+        age_at_entry_h          REAL,   -- token age in hours at entry
+        liq_usd_at_entry        REAL,   -- liquidity USD at entry
+        vol_24h_at_entry        REAL,   -- 24h volume USD at entry
+        pool_type_at_entry      TEXT,   -- raydium | pumpswap | meteora | etc.
+        venue_at_entry          TEXT,   -- venue from universe_snapshot
+        spam_flag_at_entry      INTEGER -- spam_flag from universe_snapshot
     )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_strategy ON shadow_trades_v1(strategy, entered_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_status   ON shadow_trades_v1(status)")
+    # Migrations for existing tables (v1.6 lane columns) — must run BEFORE creating lane index
+    for col, coltype in [
+        ("lane",               "TEXT"),
+        ("age_at_entry_h",     "REAL"),
+        ("liq_usd_at_entry",   "REAL"),
+        ("vol_24h_at_entry",   "REAL"),
+        ("pool_type_at_entry", "TEXT"),
+        ("venue_at_entry",     "TEXT"),
+        ("spam_flag_at_entry", "INTEGER"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE shadow_trades_v1 ADD COLUMN {col} {coltype}")
+        except Exception:
+            pass  # column already exists
+    # Lane index after migration (column guaranteed to exist)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_lane ON shadow_trades_v1(lane)")
 
     # Signal frequency log: one row per strategy per scan cycle
     c.execute("""
@@ -282,7 +306,9 @@ def get_latest_microstructure() -> list[dict]:
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        SELECT m.*
+        SELECT m.*,
+               u.age_hours, u.liq_usd, u.vol_h24, u.venue, u.pool_type,
+               u.cpamm_valid_flag, u.spam_flag, u.pair_address as u_pair_address
         FROM microstructure_log m
         INNER JOIN (
             SELECT mint_address, MAX(logged_at) as max_at
@@ -309,7 +335,9 @@ def get_all_eligible_microstructure() -> list[dict]:
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        SELECT m.*
+        SELECT m.*,
+               u.age_hours, u.liq_usd, u.vol_h24, u.venue, u.pool_type,
+               u.cpamm_valid_flag, u.spam_flag, u.pair_address as u_pair_address
         FROM microstructure_log m
         INNER JOIN (
             SELECT mint_address, MAX(logged_at) as max_at
@@ -339,6 +367,29 @@ def log_signal_frequency(strategy: str, signals_seen: int, trades_opened: int, u
         conn.close()
     except Exception as e:
         logger.debug(f"signal_frequency_log write error: {e}")
+
+# ── LANE CLASSIFICATION ──────────────────────────────────────────────────────
+# Hard gates: tokens must pass ALL to be eligible for any strategy entry.
+# These are enforced in open_trade() before the friction gate.
+LANE_GATE_MIN_AGE_H    = 4.0       # hours — exclude fresh graduates
+LANE_GATE_MIN_LIQ_USD  = 100_000   # USD — minimum liquidity
+LANE_GATE_MIN_VOL_24H  = 250_000   # USD — minimum 24h volume
+
+def classify_lane(row: dict) -> str:
+    """
+    Assign a lane label based on venue, pool_type, and age.
+    mature_raydium  : raydium/meteora, age >= 24h
+    mature_pumpswap : pumpswap, age >= 4h (passes gate)
+    fresh_pumpswap  : pumpswap, age < 4h (blocked by gate)
+    large_cap       : raydium/meteora, age >= 30 days (established tokens)
+    """
+    venue    = (row.get("venue") or "").lower()
+    age_h    = row.get("age_hours") or 0
+    if "pumpswap" in venue or "pump" in (row.get("pool_type") or "").lower():
+        return "mature_pumpswap" if age_h >= 4 else "fresh_pumpswap"
+    if age_h >= 24 * 30:  # 30 days
+        return "large_cap"
+    return "mature_raydium"
 
 # ── JUPITER FRICTION GATE ─────────────────────────────────────────────────────
 # Jupiter Ultra API: single call returns priceImpactPct + routePlan label.
@@ -571,6 +622,9 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
     # Pick top candidate by score
     best = max(candidates, key=score_fn)
     best_score = score_fn(best)
+    # Update timer BEFORE open_trade so interval is always respected
+    # (even if open_trade returns None due to position cap)
+    _last_rank_entry[strategy] = now
     logger.info(
         f"RANK {strategy}: firing top-1 candidate "
         f"{best.get('token_symbol','?')} ({best.get('mint_address','?')[:8]}) "
@@ -581,7 +635,6 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
     )
     tid = open_trade(strategy, best)
     if tid:
-        _last_rank_entry[strategy] = now
         logger.info(f"RANK {strategy}: entry opened trade_id={tid[:8]}")
         # Matched baseline for rank entry
         baseline_strat = f"baseline_matched_{strategy}"
@@ -600,6 +653,22 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
         logger.debug(f"SKIP {strategy}: position cap reached")
         return None
 
+    # ── HARD LANE GATES ───────────────────────────────────────────────────────
+    # Applied to ALL strategies (strict + rank). Prevents rug-risk tokens.
+    age_h   = row.get("age_hours") or 0
+    liq_usd = row.get("liq_usd")   or 0
+    vol_24h = row.get("vol_h24")   or 0
+    if age_h < LANE_GATE_MIN_AGE_H:
+        logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: age {age_h:.1f}h < {LANE_GATE_MIN_AGE_H}h gate")
+        return None
+    if liq_usd < LANE_GATE_MIN_LIQ_USD:
+        logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: liq ${liq_usd:,.0f} < ${LANE_GATE_MIN_LIQ_USD:,} gate")
+        return None
+    if vol_24h < LANE_GATE_MIN_VOL_24H:
+        logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: vol24h ${vol_24h:,.0f} < ${LANE_GATE_MIN_VOL_24H:,} gate")
+        return None
+
+    lane = classify_lane(row)
     mint = row["mint_address"]
 
     liq_b_for_jup  = row.get("liq_base") or 0
@@ -631,8 +700,10 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
          entry_jup_rt_pct,
          entry_r_m5, entry_r_h1, entry_buy_count_ratio, entry_vol_accel,
          entry_avg_trade_usd,
-         baseline_trigger_id, mode, status)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         baseline_trigger_id, mode, status,
+         lane, age_at_entry_h, liq_usd_at_entry, vol_24h_at_entry,
+         pool_type_at_entry, venue_at_entry, spam_flag_at_entry)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         trade_id, strategy, mint,
         row.get("token_symbol"), row.get("pair_address"),
@@ -646,12 +717,15 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
         row.get("buy_count_ratio_m5"), row.get("vol_accel_m5_vs_h1"),
         row.get("avg_trade_usd_m5"),
         baseline_trigger_id, MODE, "open",
+        lane, age_h, liq_usd, vol_24h,
+        row.get("pool_type"), row.get("venue"), row.get("spam_flag"),
     ))
     conn.commit()
     conn.close()
 
     logger.info(
         f"OPEN {strategy} {row.get('token_symbol','?')} ({mint[:8]}...) "
+        f"lane={lane} age={age_h:.1f}h liq=${liq_usd:,.0f} "
         f"jup_rt={jup_rt*100:.2f}% cpamm_rt={rt['total_friction']*100:.2f}%"
         + (f" [triggered_by={baseline_trigger_id[:8]}]" if baseline_trigger_id else "")
     )
