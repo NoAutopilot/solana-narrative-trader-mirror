@@ -328,58 +328,107 @@ def log_signal_frequency(strategy: str, signals_seen: int, trades_opened: int, u
         logger.debug(f"signal_frequency_log write error: {e}")
 
 # ── JUPITER FRICTION GATE ─────────────────────────────────────────────────────
-def get_jupiter_rt_estimate(mint: str, liq_base: float = 0, liq_quote_sol: float = 0) -> float | None:
+# Jupiter Ultra API: single call returns priceImpactPct + routePlan label.
+# Endpoint: GET /ultra/v1/order  Header: x-api-key
+# Pool-type rules:
+#   cpamm_valid_flag=1  → CPAMM math fallback OK when Jupiter unavailable
+#   cpamm_valid_flag=0  → REQUIRE Jupiter quote; no CPAMM fallback (wrong math)
+_jup_health_checked: bool = False
+
+def _check_jup_health():
+    """One-time startup health check. Sets _jupiter_api_available."""
+    global _jupiter_api_available, _jup_health_checked
+    if _jup_health_checked:
+        return
+    _jup_health_checked = True
+    try:
+        r = requests.get(
+            f"{JUPITER_BASE_URL}/ultra/v1/order",
+            headers={"x-api-key": JUPITER_API_KEY},
+            params={"inputMint": WSOL_MINT,
+                    "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "amount": "1000000"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            _jupiter_api_available = True
+            logger.info("JUP_HEALTH: OK (ultra/v1/order 200) — Jupiter RT quotes active")
+        elif r.status_code == 401:
+            _jupiter_api_available = False
+            logger.warning("JUP_HEALTH: FAIL 401 — Jupiter unavailable. CPAMM-only lanes OK; CLMM/DLMM lanes BLOCKED.")
+        else:
+            _jupiter_api_available = False
+            logger.warning(f"JUP_HEALTH: FAIL {r.status_code} — Jupiter unavailable.")
+    except Exception as e:
+        _jupiter_api_available = False
+        logger.warning(f"JUP_HEALTH: ERROR {e} — Jupiter unavailable.")
+
+
+def get_jupiter_rt_estimate(
+    mint: str,
+    liq_base: float = 0,
+    liq_quote_sol: float = 0,
+    cpamm_valid: bool = True,
+) -> float | None:
     """
     Returns total RT friction fraction (e.g. 0.008 = 0.8%) or None if no route.
-    Falls back to CPAMM math when Jupiter API is unavailable (401 / network error).
+
+    Pool-type aware:
+      cpamm_valid=True  → CPAMM math fallback when Jupiter unavailable
+      cpamm_valid=False → return None when Jupiter unavailable (CLMM/DLMM: wrong math)
+
+    Uses Jupiter Ultra API: GET /ultra/v1/order (x-api-key header).
+    priceImpactPct from Ultra is one-way impact; RT = 2 * |priceImpactPct| + DEX_FEE_RT.
     """
     global _jupiter_api_available
+    _check_jup_health()  # no-op after first call
     sol_in_lamports = int(TRADE_SIZE_SOL * LAMPORTS_PER_SOL)
 
     if _jupiter_api_available:
         try:
-            r_buy = requests.get(
-                f"{JUPITER_BASE_URL}/v6/quote",
+            r = requests.get(
+                f"{JUPITER_BASE_URL}/ultra/v1/order",
+                headers={"x-api-key": JUPITER_API_KEY},
                 params={
-                    "inputMint":   WSOL_MINT,
-                    "outputMint":  mint,
-                    "amount":      str(sol_in_lamports),
-                    "slippageBps": "50",
+                    "inputMint":  WSOL_MINT,
+                    "outputMint": mint,
+                    "amount":     str(sol_in_lamports),
                 },
-                headers={"Authorization": f"Bearer {JUPITER_API_KEY}"},
                 timeout=8,
             )
-            if r_buy.status_code == 401:
-                logger.warning("Jupiter API 401 — switching to CPAMM fallback mode for all future calls")
+            if r.status_code == 401:
+                if _jupiter_api_available:  # log only once
+                    logger.warning("Jupiter 401 mid-session — switching to CPAMM fallback for CPAMM pools")
                 _jupiter_api_available = False
-            elif r_buy.status_code == 200:
-                buy_data = r_buy.json()
-                out_tokens = int(buy_data.get("outAmount", 0))
-                if out_tokens <= 0:
-                    return None  # No route
-                # Get sell quote
-                r_sell = requests.get(
-                    f"{JUPITER_BASE_URL}/v6/quote",
-                    params={
-                        "inputMint":   mint,
-                        "outputMint":  WSOL_MINT,
-                        "amount":      str(out_tokens),
-                        "slippageBps": "50",
-                    },
-                    headers={"Authorization": f"Bearer {JUPITER_API_KEY}"},
-                    timeout=8,
+            elif r.status_code == 404:
+                # No route for this token
+                return None
+            elif r.status_code == 200:
+                data = r.json()
+                impact = abs(float(data.get("priceImpactPct") or 0)) / 100.0  # convert % to fraction
+                # RT = 2x one-way impact + platform fee (feeBps)
+                fee_bps = int(data.get("feeBps") or 0)
+                platform_fee_rt = 2 * fee_bps / 10000
+                # DEX fee is embedded in the quote (not separate), so RT ≈ 2*impact + platform_fee
+                rt_pct = 2 * impact + platform_fee_rt
+                # Log route label for auditability
+                route_plan = data.get("routePlan") or []
+                label = route_plan[0].get("swapInfo", {}).get("label", "?") if route_plan else "?"
+                logger.debug(
+                    f"Jup ultra RT for {mint[:8]}: impact={impact*100:.3f}% "
+                    f"fee={platform_fee_rt*100:.3f}% total={rt_pct*100:.3f}% route={label}"
                 )
-                if r_sell.status_code == 200:
-                    sell_data = r_sell.json()
-                    sol_back = int(sell_data.get("outAmount", 0))
-                    if sol_back <= 0:
-                        return None
-                    rt_pct = 1.0 - (sol_back / sol_in_lamports)
-                    return max(rt_pct, 0.0)
+                return max(rt_pct, 0.0)
         except requests.exceptions.Timeout:
             logger.debug(f"Jupiter timeout for {mint[:8]}")
         except Exception as e:
             logger.debug(f"Jupiter error for {mint[:8]}: {e}")
+
+    # Jupiter unavailable — pool-type determines fallback behaviour
+    if not cpamm_valid:
+        # CLMM/DLMM: CPAMM math is wrong for these pools. Block the trade.
+        logger.debug(f"SKIP {mint[:8]}: Jupiter unavailable and pool is not CPAMM — no safe friction estimate")
+        return None
 
     # CPAMM fallback: use CPAMM math + accurate DEX fee (0.50% RT = 0.25% each way)
     if liq_base > 0 and liq_quote_sol > 0:
@@ -388,7 +437,7 @@ def get_jupiter_rt_estimate(mint: str, liq_base: float = 0, liq_quote_sol: float
         logger.debug(f"CPAMM fallback RT for {mint[:8]}: {cpamm_rt*100:.2f}%")
         return min(cpamm_rt, 0.05)
     else:
-        # No liquidity data — conservative estimate
+        # No liquidity data and no Jupiter — conservative estimate for CPAMM
         return 0.008
 
 # ── PRICE FETCH ───────────────────────────────────────────────────────────────
@@ -540,9 +589,10 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
 
     mint = row["mint_address"]
 
-    liq_b_for_jup = row.get("liq_base") or 0
-    liq_q_for_jup = row.get("liq_quote_sol") or 0
-    jup_rt = get_jupiter_rt_estimate(mint, liq_b_for_jup, liq_q_for_jup)
+    liq_b_for_jup  = row.get("liq_base") or 0
+    liq_q_for_jup  = row.get("liq_quote_sol") or 0
+    cpamm_valid    = bool(row.get("cpamm_valid_flag", 1))  # default True if field missing
+    jup_rt = get_jupiter_rt_estimate(mint, liq_b_for_jup, liq_q_for_jup, cpamm_valid=cpamm_valid)
     if jup_rt is None:
         logger.info(f"SKIP {strategy} {mint[:8]}: no Jupiter route")
         return None
@@ -706,6 +756,9 @@ def run():
     logger.info("=" * 65)
 
     init_tables()
+
+    # Startup Jupiter health check
+    _check_jup_health()
 
     # Wait for microstructure data
     for _ in range(20):

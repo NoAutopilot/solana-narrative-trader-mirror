@@ -87,7 +87,7 @@ if not logger.handlers:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEXSCREENER_BASE    = "https://api.dexscreener.com"
-JUPITER_QUOTE_URL   = "https://api.jup.ag/swap/v1/quote"
+JUPITER_QUOTE_URL   = "https://api.jup.ag/ultra/v1/order"  # Updated: ultra endpoint
 WSOL_MINT           = "So11111111111111111111111111111111111111112"
 DEXSCREENER_TIMEOUT = 12
 JUPITER_TIMEOUT     = 8
@@ -96,21 +96,33 @@ TRADE_SIZE_SOL      = 0.02
 ROUND_TRIP_GATE     = 0.03   # 3% max round-trip friction
 LP_CLIFF_THRESHOLD  = 0.05   # 5% k drop = LP removal flag
 
+# ── PumpSwap universe lane ────────────────────────────────────────────────────
+# Refreshed every PUMPSWAP_REFRESH_SEC (default: 1800s = 30 min).
+# Queries DexScreener for recently graduated pump.fun tokens on pumpswap.
+# Filters: age 1h–7d, vol_h24 >= $5k, liq_usd >= $2k, dexId = pumpswap
+PUMPSWAP_REFRESH_SEC    = 1800   # refresh every 30 min
+PUMPSWAP_MAX_AGE_DAYS   = 7      # only recently graduated tokens
+PUMPSWAP_MIN_VOL_H24    = 5_000  # lower bar than established lane ($5k)
+PUMPSWAP_MIN_LIQ_USD    = 2_000  # lower bar ($2k)
+PUMPSWAP_MAX_TOKENS     = 50     # top-50 by vol
+_pumpswap_cache: list[dict] = []
+_pumpswap_last_refresh: float = 0.0
+
 # ── Discovery rule (deterministic, versioned) ─────────────────────────────────
 DISCOVERY_RULE = {
-    "version":       "v1.0",
-    "source":        "dexscreener_tokens_mint_lookup",
+    "version":       "v1.1",
+    "source":        "dexscreener_tokens_mint_lookup + pumpswap_graduated",
     "min_age_hours": 1,
     "max_age_days":  3650,
-    "min_vol_h24":   10_000,   # USD
-    "min_liq_usd":   5_000,    # USD
+    "min_vol_h24":   10_000,   # USD (established lane)
+    "min_liq_usd":   5_000,    # USD (established lane)
     "max_tokens":    200,
     "sort_by":       "vol_h24_desc",
     "pool_types":    sorted(CPMM_VALID_DEX_IDS),
     "quote_filter":  "SOL_wSOL_only",
-    "scan_method":   "fixed_mint_list_20_tokens",
-    "universe_lane": "trending_established",
-    "lane_caveat":   "NOT full universe; covers top-20 liquid Solana tokens only",
+    "scan_method":   "fixed_mint_list_20_tokens + pumpswap_graduated_lane",
+    "universe_lane": "trending_established + pumpswap_graduated",
+    "lane_caveat":   "Two lanes: top-20 large-cap + top-50 recently graduated pumpswap tokens",
 }
 
 def get_conn():
@@ -282,9 +294,116 @@ def get_jupiter_quote(input_mint: str, output_mint: str, sol_in: float) -> dict 
         return None
 
 # ── DexScreener candidate discovery ──────────────────────────────────────────
+def fetch_pumpswap_graduated() -> list[dict]:
+    """
+    Fetch recently graduated pump.fun tokens from DexScreener pumpswap lane.
+    Refreshes every PUMPSWAP_REFRESH_SEC; returns cached list between refreshes.
+    """
+    global _pumpswap_cache, _pumpswap_last_refresh
+    now = time.time()
+    if now - _pumpswap_last_refresh < PUMPSWAP_REFRESH_SEC and _pumpswap_cache:
+        return _pumpswap_cache
+
+    pairs = []
+    # DexScreener: search for pumpswap pairs sorted by volume
+    # Use the /latest/dex/search endpoint with chain=solana filter
+    try:
+        r = requests.get(
+            f"{DEXSCREENER_BASE}/latest/dex/search",
+            params={"q": "pumpswap"},
+            timeout=DEXSCREENER_TIMEOUT,
+        )
+        data = r.json()
+        raw = data.get("pairs") or []
+        # Filter to pumpswap on Solana
+        sol_pump = [
+            p for p in raw
+            if isinstance(p, dict)
+            and p.get("chainId") == "solana"
+            and p.get("dexId", "").lower() == "pumpswap"
+        ]
+        pairs.extend(sol_pump)
+    except Exception as e:
+        logger.debug(f"PumpSwap search error: {e}")
+
+    # Also try the /token-profiles endpoint for recently boosted tokens
+    try:
+        r2 = requests.get(
+            f"{DEXSCREENER_BASE}/token-profiles/latest/v1",
+            timeout=DEXSCREENER_TIMEOUT,
+        )
+        if r2.status_code == 200:
+            profiles = r2.json()
+            if isinstance(profiles, list):
+                sol_mints = [
+                    p.get("tokenAddress") for p in profiles
+                    if p.get("chainId") == "solana" and p.get("tokenAddress")
+                ][:30]
+                if sol_mints:
+                    # Batch lookup
+                    for i in range(0, len(sol_mints), 10):
+                        batch = sol_mints[i:i+10]
+                        try:
+                            rb = requests.get(
+                                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(batch)}",
+                                timeout=DEXSCREENER_TIMEOUT,
+                            )
+                            bp = rb.json().get("pairs") or []
+                            sol_pump_b = [
+                                p for p in bp
+                                if isinstance(p, dict)
+                                and p.get("chainId") == "solana"
+                                and p.get("dexId", "").lower() == "pumpswap"
+                            ]
+                            pairs.extend(sol_pump_b)
+                        except Exception:
+                            pass
+    except Exception as e:
+        logger.debug(f"PumpSwap token-profiles error: {e}")
+
+    # Apply filters
+    now_dt = datetime.now(timezone.utc)
+    filtered = []
+    seen = set()
+    pairs.sort(key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0), reverse=True)
+    for pair in pairs:
+        if len(filtered) >= PUMPSWAP_MAX_TOKENS:
+            break
+        mint = pair.get("baseToken", {}).get("address", "")
+        if not mint or mint in seen:
+            continue
+        # Quote filter
+        quote_mint = pair.get("quoteToken", {}).get("address", "")
+        if quote_mint not in SOL_QUOTE_MINTS:
+            continue
+        # Age filter
+        created_ms = pair.get("pairCreatedAt")
+        if created_ms:
+            created_dt = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
+            age_h = (now_dt - created_dt).total_seconds() / 3600
+            if age_h < 1 or age_h > PUMPSWAP_MAX_AGE_DAYS * 24:
+                continue
+            pair["_age_hours"] = age_h
+        else:
+            pair["_age_hours"] = None
+        # Volume / liquidity filters
+        vol_h24 = float(pair.get("volume", {}).get("h24", 0) or 0)
+        liq_usd = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        if vol_h24 < PUMPSWAP_MIN_VOL_H24 or liq_usd < PUMPSWAP_MIN_LIQ_USD:
+            continue
+        seen.add(mint)
+        filtered.append(pair)
+
+    _pumpswap_cache = filtered
+    _pumpswap_last_refresh = now
+    logger.info(f"PumpSwap lane refreshed: {len(filtered)} graduated tokens (raw={len(pairs)})")
+    return filtered
+
+
 def discover_candidates() -> tuple[list[dict], dict]:
     """
     Deterministic candidate discovery per DISCOVERY_RULE.
+    Two lanes: (1) established top-20 large-cap, (2) pumpswap graduated.
     Returns (pairs, rejection_counts).
     """
     rejection_counts = {
@@ -334,16 +453,10 @@ def discover_candidates() -> tuple[list[dict], dict]:
         except Exception as e:
             logger.debug(f"Discovery fetch error ({url}): {e}")
 
-    # Also fetch top Solana tokens by volume
-    try:
-        r = requests.get(
-            f"{DEXSCREENER_BASE}/latest/dex/tokens/solana",
-            timeout=DEXSCREENER_TIMEOUT
-        )
-        data = r.json()
-        all_pairs.extend(data.get("pairs", []))
-    except Exception:
-        pass
+    # Lane 2: PumpSwap graduated tokens (refreshed every 30 min)
+    pumpswap_pairs = fetch_pumpswap_graduated()
+    all_pairs.extend(pumpswap_pairs)
+    logger.debug(f"Universe: {len(all_pairs)} total pairs (established + {len(pumpswap_pairs)} pumpswap)")
 
     now = datetime.now(timezone.utc)
     filtered = []
