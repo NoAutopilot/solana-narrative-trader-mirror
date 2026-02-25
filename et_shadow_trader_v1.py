@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition)
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.10
 
 Strategy variants:
   momentum_strict  — strict threshold entries (r_m5>=0.8%, buy_ratio>=0.60, vol_accel>=1.5)
@@ -20,6 +19,43 @@ Key changes from previous version:
   - Signal frequency counters written to signal_frequency_log table each cycle
   - Universe expansion: rank mode scans all eligible tokens (not just CPAMM)
 
+v1.7 additions:
+  - Crash/rug risk filters: sell_ratio_spike, vol_h1_spike, liq_drop_proxy
+  - filter_rejection_log table for audit trail of blocked entries
+  - Baseline trades bypass rug filters (model unfiltered random selection)
+  - Note: mint/freeze authority check omitted (pump.fun tokens have revoked
+    authorities by design — check never fires, adds latency)
+
+v1.10 additions:
+  - Lane split (4 lanes):
+      pumpfun_early:      pumpfun_origin=1 AND age < 24h  -> NO TRADES (log only)
+      pumpfun_mature:     pumpfun_origin=1 AND age >= 24h -> eligible with stability gates
+      non_pumpfun_mature: pumpfun_origin=0 AND age >= 4h
+      large_cap_ray:      age >= 30d (benchmark)
+  - pumpfun_mature extra stability gates:
+      rv_5m <= PF_MATURE_RV5M_MAX (1.5%)
+      range_5m <= PF_MATURE_RANGE_MULT * rv_5m (3x)
+      sell_ratio_spike=0, liq_drop_proxy=0, vol_h1_spike=0 over last N polls
+  - EXCLUDE_PUMPFUN_ORIGIN removed; replaced by lane-based eligibility
+  - Universe composition section in report (pumpfun share by vol/liq tier)
+
+v1.9 additions:
+  - P0:  Hard pumpfun_origin exclusion gate — log but never trade pumpfun_origin tokens
+  - P0.1: run_id (UUID per process start) + git_commit + lane_at_entry stored on every trade
+  - P1:  momentum_strict DISABLED; anti-chase filter (r_m5 > 1.0% blocks all entries)
+  - P2:  pullback_score_rank is SOLE active strategy; all others log-only
+  - P3:  Continuous score: z_depth + vol_accel + buy_ratio - penalty*risk_flags; top-1/hour
+  - P4:  filters_evaluated_count per scan + per-filter trigger counters
+
+v1.8 additions:
+  - Volatility-adaptive exits: SL/TP scale with rv_5m from microstructure_log
+    SL = -max(RT_FLOOR + SL_BUFFER, K_SL * rv_5m)
+    TP =  max(RT_FLOOR + TP_EDGE,   K_TP * rv_5m)
+  - Vol no-trade filter: skip entry if K_SL * rv_5m > VOL_CAP_PCT (regime too hot)
+  - entry_sl_pct / entry_tp_pct stored per trade for parameter sweep report
+  - pumpfun_origin lane tag from microstructure_log
+  - Baseline trades use FIXED exits (K_SL=0 path) for clean comparison
+
 Spec (from ET v1 playbook):
   A) Universe + Friction Gate:
      - SOL/wSOL quote only
@@ -32,11 +68,12 @@ Spec (from ET v1 playbook):
      - live_sim_mode: MAX_OPEN_PER_STRATEGY=1, MAX_OPEN_GLOBAL=1
      - Set MODE = "research_mode" or "live_sim_mode" below
 
-  C) Exit Policy (unified across all strategies):
-     - take_profit_pct  = +4.0%
-     - stop_loss_pct    = -2.0%
+  C) Exit Policy (v1.8 volatility-adaptive):
+     - SL = -max(RT_FLOOR + SL_BUFFER, K_SL * rv_5m)  [floor: -2.0%]
+     - TP =  max(RT_FLOOR + TP_EDGE,   K_TP * rv_5m)  [floor: +4.0%]
      - max_hold_minutes = 12
      - liq_cliff_exit   = True (CPAMM only)
+     - Vol no-trade: skip if K_SL * rv_5m > VOL_CAP_PCT (4.5%)
 
   D) Entry Conditions (v1):
      momentum_strict:
@@ -120,24 +157,75 @@ MAX_OPEN_GLOBAL             = 1          # only enforced in live_sim_mode
 LP_CLIFF_THRESHOLD          = 0.05       # 5% k-drop triggers liq_cliff exit
 
 # ── SCORE/RANK FALLBACK ───────────────────────────────────────────────────────
-# Fires 1 trade per strategy per SCORE_RANK_INTERVAL_SEC using top-ranked candidate.
-# Uses ALL eligible tokens (no cpamm_valid_flag filter) to avoid starvation.
+# v1.9: pullback_score_rank is the SOLE active strategy.
+# All other variants are LOG-ONLY (signals counted, no trades opened).
 SCORE_RANK_ENABLED          = True
-SCORE_RANK_INTERVAL_SEC     = 1800       # 30 min — reach n>=20 faster than 1h
-SCORE_RANK_MIN_R_M5         = 0.0        # must have at least flat/positive momentum
-SCORE_RANK_MIN_BUY_RATIO    = 0.25       # relaxed buy ratio floor for rank (research mode)
-SCORE_RANK_MIN_VOL_ACCEL    = 0.2        # relaxed vol accel floor for rank (research mode)
+# v1.11 P2: research_mode fires top-1 every 15 min; live_sim keeps 1h cadence
+SCORE_RANK_INTERVAL_SEC_RESEARCH = 900   # 15 min — accelerated data collection
+SCORE_RANK_INTERVAL_SEC_LIVE     = 3600  # 1 hour — live sim cadence
+SCORE_RANK_INTERVAL_SEC     = SCORE_RANK_INTERVAL_SEC_RESEARCH if MODE == "research_mode" else SCORE_RANK_INTERVAL_SEC_LIVE
+SCORE_RANK_MIN_R_M5         = 0.0
+SCORE_RANK_MIN_BUY_RATIO    = 0.25
+SCORE_RANK_MIN_VOL_ACCEL    = 0.2
+
+# ── v1.10 LANE GATES ──────────────────────────────────────────────────────────
+# pumpfun_early (age < 24h) is always blocked — no constant needed.
+# pumpfun_mature (age >= 24h) is eligible but requires extra stability gates:
+PF_MATURE_MIN_AGE_H         = 24.0       # hours — pumpfun_origin must be >= 24h old
+PF_MATURE_RV5M_MAX          = 1.5        # % — max rv_5m for pumpfun_mature entries
+PF_MATURE_RANGE_MULT        = 3.0        # range_5m must be <= this * rv_5m
+# non_pumpfun_mature: pumpfun_origin=0, age >= LANE_GATE_MIN_AGE_H (4h)
+# large_cap_ray: age >= 30 days (benchmark lane, no extra gates)
+
+# P1: Anti-chase filter — block ALL long entries when r_m5 > this cap.
+R_M5_CHASE_CAP              = 1.0        # % — skip entry if r_m5 > this
+ANTI_CHASE_FILTER_ENABLED   = True
+
+# P3: pullback_score_rank weights
+# score = W_DEPTH*z_depth + W_VOL_ACCEL*vol_accel + W_BUY_RATIO*(buy_ratio-0.5) - W_PENALTY*risk_flags
+PSR_W_DEPTH                 = 1.0
+PSR_W_VOL_ACCEL             = 1.5
+PSR_W_BUY_RATIO             = 0.5
+PSR_W_PENALTY               = 3.0
+PSR_MIN_R_H1                = 0.5        # % — minimum h1 gain before pullback
+PSR_MIN_DEPTH               = 0.3        # % — minimum pullback depth
+PSR_MIN_BUY_RATIO           = 0.25
 
 FRICTION_GATE_MAX_RT        = 0.010      # 1.0% max total RT friction
 DEXSCREENER_TIMEOUT         = 12
 WSOL_MINT                   = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL            = 1_000_000_000
 
-# ── UNIFIED EXIT POLICY ───────────────────────────────────────────────────────
-EXIT_TAKE_PROFIT_PCT        = 4.0        # +4.0% gross
-EXIT_STOP_LOSS_PCT          = -2.0       # -2.0% gross
+# ── UNIFIED EXIT POLICY (v1.8 volatility-adaptive) ──────────────────────────
+# Fixed floors (used when rv_5m unavailable or for baseline trades)
+EXIT_TAKE_PROFIT_PCT        = 4.0        # +4.0% gross floor
+EXIT_STOP_LOSS_PCT          = -2.0       # -2.0% gross floor
 EXIT_MAX_HOLD_MINUTES       = 12
 EXIT_LIQ_CLIFF              = True
+
+# Adaptive exit multipliers (v1.8)
+# SL = -max(RT_floor + SL_BUFFER, K_SL * rv_5m)
+# TP =  max(RT_floor + TP_EDGE,   K_TP * rv_5m)
+ADAPTIVE_EXITS_ENABLED      = True
+K_SL                        = 2.0        # SL = K_SL * rv_5m (e.g. 2 sigma)
+K_TP                        = 4.0        # TP = K_TP * rv_5m (e.g. 4 sigma)
+SL_BUFFER                   = 0.003      # 0.3% buffer above RT floor for SL
+TP_EDGE                     = 0.015      # 1.5% edge buffer above RT floor for TP
+VOL_CAP_PCT                 = 4.5        # skip entry if K_SL * rv_5m > this (regime too hot)
+RV_WARMUP_POLLS             = 4          # min polls before rv_5m is trusted (else use fixed)
+
+# ── CRASH / RUG RISK FILTERS (v1.7) ──────────────────────────────────────────
+# Applied in open_trade() BEFORE the Jupiter friction gate.
+# These are logged to filter_rejection_log for audit.
+RUG_FILTER_ENABLED          = True
+RUG_LIQ_DROP_1H_MAX         = 0.40   # block if liq_usd dropped >40% in last 1h
+                                      # proxy: vol_h1 / vol_h6 ratio spike
+RUG_SELL_RATIO_MAX          = 0.75   # block if sell txns > 75% of all txns in m5
+                                      # (churn proxy: sudden holder exit)
+RUG_VOL_H1_SPIKE_MAX        = 8.0    # block if vol_h1 > 8x vol_h6/6 (1h avg)
+                                      # catches sudden volume spikes preceding rugs
+RUG_MIN_TXNS_M5             = 5      # only apply sell-ratio filter if >=5 txns in m5
+                                      # (avoid false positives on thin trading)
 
 # ── ENTRY CONDITIONS v1 (strict) ──────────────────────────────────────────────
 MOMENTUM_R_M5_MIN           = 0.8
@@ -160,6 +248,39 @@ _last_rank_entry: dict[str, float] = {}
 _jupiter_api_available: bool = True
 # Signal frequency counters: {strategy: {"signals_seen": int, "trades_opened": int}}
 _signal_freq: dict[str, dict] = {}
+# Per-trade adaptive SL/TP thresholds: {trade_id: {"sl_pct": float, "tp_pct": float}}
+_adaptive_thresholds: dict[str, dict] = {}
+
+# ── v1.9 RUN IDENTITY ────────────────────────────────────────────────────────
+# run_id: UUID generated at process start, stored on every trade for run isolation.
+# git_commit: short hash of current HEAD (or 'unknown' if not in a git repo).
+import subprocess as _subprocess
+_RUN_ID: str = str(uuid.uuid4())
+def _get_git_commit() -> str:
+    try:
+        return _subprocess.check_output(
+            ["git", "-C", "/root/solana_trader", "rev-parse", "--short", "HEAD"],
+            stderr=_subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+_GIT_COMMIT: str = _get_git_commit()
+
+# ── v1.9 FILTER SCAN COUNTERS ────────────────────────────────────────────────
+# Accumulated per main-loop cycle, written to filter_rejection_log summary.
+_filter_scan_counts: dict[str, int] = {
+    "evaluated":          0,
+    "pumpfun_excluded":   0,
+    "anti_chase":         0,
+    "lane_age":           0,
+    "lane_liq":           0,
+    "lane_vol":           0,
+    "sell_ratio_spike":   0,
+    "vol_h1_spike":       0,
+    "liq_drop_proxy":     0,
+    "vol_no_trade":       0,
+    "friction_gate":      0,
+}
 
 # ── DB HELPERS ────────────────────────────────────────────────────────────────
 def get_conn():
@@ -233,6 +354,28 @@ def init_tables():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_strategy ON shadow_trades_v1(strategy, entered_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_status   ON shadow_trades_v1(status)")
+    # Migrations for existing tables (v1.7 filter_rejection_log)
+    try:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS filter_rejection_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            logged_at       TEXT    NOT NULL,
+            strategy        TEXT    NOT NULL,
+            mint_address    TEXT    NOT NULL,
+            token_symbol    TEXT,
+            filter_name     TEXT    NOT NULL,
+            filter_value    REAL,
+            filter_threshold REAL,
+            lane            TEXT,
+            age_h           REAL,
+            liq_usd         REAL,
+            vol_24h         REAL
+        )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_frl_at ON filter_rejection_log(logged_at, strategy)")
+    except Exception:
+        pass
+
     # Migrations for existing tables (v1.6 lane columns) — must run BEFORE creating lane index
     for col, coltype in [
         ("lane",               "TEXT"),
@@ -242,6 +385,11 @@ def init_tables():
         ("pool_type_at_entry", "TEXT"),
         ("venue_at_entry",     "TEXT"),
         ("spam_flag_at_entry", "INTEGER"),
+        # v1.9 columns
+        ("run_id",             "TEXT"),
+        ("git_commit",         "TEXT"),
+        ("lane_at_entry",      "TEXT"),
+        ("entry_score",        "REAL"),
     ]:
         try:
             c.execute(f"ALTER TABLE shadow_trades_v1 ADD COLUMN {col} {coltype}")
@@ -249,6 +397,25 @@ def init_tables():
             pass  # column already exists
     # Lane index after migration (column guaranteed to exist)
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_lane ON shadow_trades_v1(lane)")
+
+    # Filter rejection log: one row per rejected trade attempt
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS filter_rejection_log (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        logged_at       TEXT    NOT NULL,
+        strategy        TEXT    NOT NULL,
+        mint_address    TEXT    NOT NULL,
+        token_symbol    TEXT,
+        filter_name     TEXT    NOT NULL,
+        filter_value    REAL,
+        filter_threshold REAL,
+        lane            TEXT,
+        age_h           REAL,
+        liq_usd         REAL,
+        vol_24h         REAL
+    )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_frl_at ON filter_rejection_log(logged_at, strategy)")
 
     # Signal frequency log: one row per strategy per scan cycle
     c.execute("""
@@ -263,9 +430,50 @@ def init_tables():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_sfl_at ON signal_frequency_log(logged_at, strategy)")
 
+    # v1.9: filter_scan_log — per-cycle filter evaluation counts
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS filter_scan_log (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        logged_at           TEXT    NOT NULL,
+        run_id              TEXT,
+        evaluated           INTEGER DEFAULT 0,
+        pumpfun_excluded    INTEGER DEFAULT 0,
+        anti_chase          INTEGER DEFAULT 0,
+        lane_age            INTEGER DEFAULT 0,
+        lane_liq            INTEGER DEFAULT 0,
+        lane_vol            INTEGER DEFAULT 0,
+        sell_ratio_spike    INTEGER DEFAULT 0,
+        vol_h1_spike        INTEGER DEFAULT 0,
+        liq_drop_proxy      INTEGER DEFAULT 0,
+        vol_no_trade        INTEGER DEFAULT 0,
+        friction_gate       INTEGER DEFAULT 0
+    )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_fsl_at ON filter_scan_log(logged_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_run ON shadow_trades_v1(run_id)")
+
+    # v1.11 P0: run_registry — one row per process start, for run isolation
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS run_registry (
+        run_id          TEXT    PRIMARY KEY,
+        git_commit      TEXT,
+        start_ts        TEXT    NOT NULL,
+        mode            TEXT,
+        version         TEXT,
+        lane_gates      TEXT,
+        key_params      TEXT
+    )
+    """)
+
+    # v1.11 P4: invalid_pair column on shadow_trades_v1
+    try:
+        c.execute("ALTER TABLE shadow_trades_v1 ADD COLUMN invalid_pair INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
-    logger.info("Tables initialized: shadow_trades_v1, signal_frequency_log")
+    logger.info("Tables initialized: shadow_trades_v1, run_registry, signal_frequency_log, filter_scan_log")
 
 def count_open_by_strategy(strategy: str) -> int:
     conn = get_conn()
@@ -326,6 +534,44 @@ def get_latest_microstructure() -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
+def get_rv5m_for_mint(mint: str) -> float | None:
+    """
+    Return the most recent rv_5m for a mint from microstructure_log.
+    Returns None if no data or column missing (warmup period).
+    """
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""
+            SELECT rv_5m FROM microstructure_log
+            WHERE mint_address = ?
+              AND rv_5m IS NOT NULL
+            ORDER BY logged_at DESC
+            LIMIT 1
+        """, (mint,))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return float(row[0])
+        return None
+    except Exception:
+        return None
+
+def compute_adaptive_exits(rt_floor: float, rv_5m: float | None) -> tuple[float, float]:
+    """
+    Compute adaptive SL and TP thresholds.
+    Returns (sl_pct, tp_pct) as signed percentages (sl negative, tp positive).
+    Falls back to fixed floors when rv_5m is None.
+    """
+    if not ADAPTIVE_EXITS_ENABLED or rv_5m is None:
+        return EXIT_STOP_LOSS_PCT, EXIT_TAKE_PROFIT_PCT
+    sl = -max(rt_floor * 100 + SL_BUFFER * 100, K_SL * rv_5m)
+    tp =  max(rt_floor * 100 + TP_EDGE * 100,   K_TP * rv_5m)
+    # Clamp: SL floor at -10% (don't widen too far), TP cap at 20%
+    sl = max(sl, -10.0)
+    tp = min(tp, 20.0)
+    return sl, tp
+
 def get_all_eligible_microstructure() -> list[dict]:
     """
     Returns ALL eligible tokens regardless of pool type (CPAMM, CLMM, DLMM).
@@ -355,6 +601,107 @@ def get_all_eligible_microstructure() -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
+def log_filter_rejection(
+    strategy: str, mint: str, symbol: str, filter_name: str,
+    filter_value: float | None, filter_threshold: float | None,
+    lane: str | None = None, age_h: float | None = None,
+    liq_usd: float | None = None, vol_24h: float | None = None,
+):
+    """Write a filter rejection to filter_rejection_log for audit."""
+    try:
+        conn = get_conn()
+        conn.execute("""
+            INSERT INTO filter_rejection_log
+            (logged_at, strategy, mint_address, token_symbol, filter_name,
+             filter_value, filter_threshold, lane, age_h, liq_usd, vol_24h)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            strategy, mint, symbol, filter_name,
+            filter_value, filter_threshold, lane, age_h, liq_usd, vol_24h,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"filter_rejection_log write error: {e}")
+
+def check_rug_risk(row: dict, strategy: str) -> tuple[bool, str]:
+    """
+    Check crash/rug risk signals before entry.
+    Returns (is_risky: bool, reason: str).
+    Logs rejections to filter_rejection_log.
+
+    Filters applied:
+      1. sell_ratio_spike: sell txns > RUG_SELL_RATIO_MAX of all m5 txns
+         (sudden holder exit / churn proxy)
+      2. vol_h1_spike: vol_h1 > RUG_VOL_H1_SPIKE_MAX * (vol_h6/6)
+         (abnormal 1h volume spike preceding rug pulls)
+      3. liq_drop_1h: vol_h1 / vol_h6 ratio combined with sell_ratio
+         (heuristic for liquidity drain)
+
+    Note: mint/freeze authority check via RPC is intentionally omitted.
+    pump.fun graduated tokens have revoked authorities (None) by design —
+    the check would never fire and adds latency. The k-drop exit (LP cliff)
+    already handles in-trade liquidity removal.
+    """
+    if not RUG_FILTER_ENABLED:
+        return False, ""
+
+    mint   = row.get("mint_address", "?")
+    symbol = row.get("token_symbol", "?")
+    lane   = classify_lane(row)
+    age_h  = row.get("age_hours") or 0
+    liq    = row.get("liq_usd") or 0
+    vol24h = row.get("vol_h24") or 0
+
+    # ── Filter 1: Sell-ratio spike (churn proxy) ──────────────────────────────
+    sells_m5 = row.get("sells_m5") or 0
+    buys_m5  = row.get("buys_m5")  or 0
+    total_m5 = buys_m5 + sells_m5
+    if total_m5 >= RUG_MIN_TXNS_M5 and sells_m5 > 0:
+        sell_ratio = sells_m5 / total_m5
+        if sell_ratio > RUG_SELL_RATIO_MAX:
+            reason = f"sell_ratio_spike: {sell_ratio:.2f} > {RUG_SELL_RATIO_MAX} (sells={sells_m5} buys={buys_m5})"
+            logger.info(f"RUG_FILTER {strategy} {symbol} ({mint[:8]}): {reason}")
+            log_filter_rejection(
+                strategy, mint, symbol, "sell_ratio_spike",
+                sell_ratio, RUG_SELL_RATIO_MAX, lane, age_h, liq, vol24h
+            )
+            return True, reason
+
+    # ── Filter 2: Vol-H1 spike (abnormal volume preceding rug) ───────────────
+    vol_h1 = row.get("vol_h1") or 0
+    vol_h6 = row.get("vol_h6") or 0
+    if vol_h6 > 0 and vol_h1 > 0:
+        vol_h1_vs_avg = vol_h1 / (vol_h6 / 6.0)  # ratio vs 1h average over last 6h
+        if vol_h1_vs_avg > RUG_VOL_H1_SPIKE_MAX:
+            reason = f"vol_h1_spike: {vol_h1_vs_avg:.1f}x avg (vol_h1=${vol_h1:,.0f} vol_h6avg=${vol_h6/6:,.0f})"
+            logger.info(f"RUG_FILTER {strategy} {symbol} ({mint[:8]}): {reason}")
+            log_filter_rejection(
+                strategy, mint, symbol, "vol_h1_spike",
+                vol_h1_vs_avg, RUG_VOL_H1_SPIKE_MAX, lane, age_h, liq, vol24h
+            )
+            return True, reason
+
+    # ── Filter 3: Liq-drop proxy (high sell ratio + vol spike combined) ───────
+    # If sell ratio is elevated (>60%) AND vol_h1 is >4x avg, flag as liq drain
+    if total_m5 >= RUG_MIN_TXNS_M5 and vol_h6 > 0 and vol_h1 > 0:
+        sell_ratio_soft = sells_m5 / total_m5 if total_m5 > 0 else 0
+        vol_h1_ratio    = vol_h1 / (vol_h6 / 6.0)
+        if sell_ratio_soft > 0.60 and vol_h1_ratio > 4.0:
+            reason = (
+                f"liq_drop_proxy: sell_ratio={sell_ratio_soft:.2f} + "
+                f"vol_h1_spike={vol_h1_ratio:.1f}x (combined rug signal)"
+            )
+            logger.info(f"RUG_FILTER {strategy} {symbol} ({mint[:8]}): {reason}")
+            log_filter_rejection(
+                strategy, mint, symbol, "liq_drop_proxy",
+                vol_h1_ratio, 4.0, lane, age_h, liq, vol24h
+            )
+            return True, reason
+
+    return False, ""
+
 def log_signal_frequency(strategy: str, signals_seen: int, trades_opened: int, universe_size: int):
     """Write signal frequency data to DB for reporting."""
     try:
@@ -368,6 +715,35 @@ def log_signal_frequency(strategy: str, signals_seen: int, trades_opened: int, u
     except Exception as e:
         logger.debug(f"signal_frequency_log write error: {e}")
 
+def log_filter_scan(counts: dict):
+    """Write per-cycle filter evaluation counts to filter_scan_log."""
+    try:
+        conn = get_conn()
+        conn.execute("""
+            INSERT INTO filter_scan_log
+            (logged_at, run_id, evaluated, pumpfun_excluded, anti_chase,
+             lane_age, lane_liq, lane_vol,
+             sell_ratio_spike, vol_h1_spike, liq_drop_proxy, vol_no_trade, friction_gate)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(), _RUN_ID,
+            counts.get("evaluated", 0),
+            counts.get("pumpfun_excluded", 0),
+            counts.get("anti_chase", 0),
+            counts.get("lane_age", 0),
+            counts.get("lane_liq", 0),
+            counts.get("lane_vol", 0),
+            counts.get("sell_ratio_spike", 0),
+            counts.get("vol_h1_spike", 0),
+            counts.get("liq_drop_proxy", 0),
+            counts.get("vol_no_trade", 0),
+            counts.get("friction_gate", 0),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"filter_scan_log write error: {e}")
+
 # ── LANE CLASSIFICATION ──────────────────────────────────────────────────────
 # Hard gates: tokens must pass ALL to be eligible for any strategy entry.
 # These are enforced in open_trade() before the friction gate.
@@ -377,19 +753,31 @@ LANE_GATE_MIN_VOL_24H  = 250_000   # USD — minimum 24h volume
 
 def classify_lane(row: dict) -> str:
     """
-    Assign a lane label based on venue, pool_type, and age.
-    mature_raydium  : raydium/meteora, age >= 24h
-    mature_pumpswap : pumpswap, age >= 4h (passes gate)
-    fresh_pumpswap  : pumpswap, age < 4h (blocked by gate)
-    large_cap       : raydium/meteora, age >= 30 days (established tokens)
+    Assign a lane label based on pumpfun_origin flag, age, and venue.
+
+    Lane taxonomy (v1.10):
+      pumpfun_early:      pumpfun_origin=1 AND age < 24h  -> blocked (log only)
+      pumpfun_mature:     pumpfun_origin=1 AND age >= 24h -> eligible with stability gates
+      large_cap_ray:      pumpfun_origin=0 AND age >= 30d -> benchmark lane
+      non_pumpfun_mature: pumpfun_origin=0 AND 4h <= age < 30d -> standard eligible
+      unknown:            fallback (missing data)
     """
-    venue    = (row.get("venue") or "").lower()
-    age_h    = row.get("age_hours") or 0
-    if "pumpswap" in venue or "pump" in (row.get("pool_type") or "").lower():
-        return "mature_pumpswap" if age_h >= 4 else "fresh_pumpswap"
+    age_h     = row.get("age_hours") or 0
+    pf_origin = row.get("pumpfun_origin") or 0
+
+    # Also treat pumpswap venue as pumpfun_origin if flag not set
+    venue     = (row.get("venue") or "").lower()
+    pool_type = (row.get("pool_type") or "").lower()
+    if "pumpswap" in venue or "pump" in pool_type:
+        pf_origin = 1
+
+    if pf_origin:
+        return "pumpfun_mature" if age_h >= PF_MATURE_MIN_AGE_H else "pumpfun_early"
+
+    # Non-pump venues
     if age_h >= 24 * 30:  # 30 days
-        return "large_cap"
-    return "mature_raydium"
+        return "large_cap_ray"
+    return "non_pumpfun_mature"
 
 # ── JUPITER FRICTION GATE ─────────────────────────────────────────────────────
 # Jupiter Ultra API: single call returns priceImpactPct + routePlan label.
@@ -575,101 +963,245 @@ def score_momentum(row: dict) -> float:
     return r_m5 * buy_ratio * vol_accel * (0.5 + 0.5 * avg_norm)
 
 def score_pullback(row: dict) -> float:
-    """Composite pullback score. Higher = better candidate."""
+    """Composite pullback score (legacy rank). Higher = better candidate."""
     r_h1      = max(row.get("r_h1") or 0, 0)
     r_m5_neg  = max(-(row.get("r_m5") or 0), 0)  # want r_m5 to be negative
     buy_ratio = max(row.get("buy_count_ratio_m5") or 0, 0)
     return r_h1 * r_m5_neg * buy_ratio
 
+def score_pullback_v19(row: dict) -> float:
+    """
+    v1.9 continuous pullback score (P3).
+    score = W_DEPTH*z_depth + W_VOL_ACCEL*vol_accel + W_BUY_RATIO*(buy_ratio-0.5) - W_PENALTY*risk_flags
+
+    z_depth = -r_m5 / rv_5m  (depth in sigma units; requires rv_5m > 0)
+    Falls back to raw -r_m5 when rv_5m unavailable.
+    risk_flags: count of active risk signals (sell_ratio_spike, vol_h1_spike, liq_drop_proxy)
+    """
+    r_m5      = row.get("r_m5") or 0
+    rv_5m     = row.get("rv_5m") or 0
+    vol_accel = max(row.get("vol_accel_m5_vs_h1") or 0, 0)
+    buy_ratio = max(row.get("buy_count_ratio_m5") or 0, 0)
+
+    # Depth component: z_depth (sigma units) or raw depth
+    if rv_5m > 0.01:  # require at least 0.01% rv_5m to avoid div-by-zero
+        z_depth = max(-r_m5 / rv_5m, 0)  # positive when r_m5 is negative
+    else:
+        z_depth = max(-r_m5, 0)  # raw depth fallback
+
+    # Risk flag count (penalty)
+    sells_m5 = row.get("sells_m5") or 0
+    buys_m5  = row.get("buys_m5") or 0
+    total_m5 = buys_m5 + sells_m5
+    vol_h1   = row.get("vol_h1") or 0
+    vol_h6   = row.get("vol_h6") or 0
+    risk_flags = 0
+    if total_m5 >= RUG_MIN_TXNS_M5 and total_m5 > 0:
+        sell_ratio = sells_m5 / total_m5
+        if sell_ratio > RUG_SELL_RATIO_MAX:
+            risk_flags += 1
+    if vol_h6 > 0 and vol_h1 > 0:
+        if (vol_h1 / (vol_h6 / 6.0)) > RUG_VOL_H1_SPIKE_MAX:
+            risk_flags += 1
+
+    score = (
+        PSR_W_DEPTH     * z_depth
+        + PSR_W_VOL_ACCEL * vol_accel
+        + PSR_W_BUY_RATIO * (buy_ratio - 0.5)
+        - PSR_W_PENALTY   * risk_flags
+    )
+    return score
+
 def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str | None:
     """
-    If SCORE_RANK_ENABLED and no rank entry has fired for this strategy in
-    SCORE_RANK_INTERVAL_SEC, fire a rank entry using the top candidate by score_fn.
-    Uses all_rows (ALL eligible tokens, not just CPAMM) to avoid starvation.
-    Returns trade_id on success, None otherwise.
+    v1.9: Only fires for pullback_score_rank (sole active strategy).
+    All other strategies are log-only — this function returns None for them.
+    Applies P0 (pumpfun exclusion) and P1 (anti-chase) gates to candidate pool.
     """
     if not SCORE_RANK_ENABLED:
+        return None
+    # v1.9: only pullback_score_rank opens trades
+    if strategy not in ("pullback_score_rank", "baseline_matched_pullback_score_rank"):
         return None
     now = time.time()
     last = _last_rank_entry.get(strategy, 0)
     if now - last < SCORE_RANK_INTERVAL_SEC:
         return None  # Not time yet
 
-    # Filter to minimally qualifying candidates (relaxed floors)
-    if strategy == "momentum_rank":
-        candidates = [
-            r for r in all_rows
-            if (r.get("r_m5") or 0) >= SCORE_RANK_MIN_R_M5
-            and (r.get("buy_count_ratio_m5") or 0) >= SCORE_RANK_MIN_BUY_RATIO
-            and (r.get("vol_accel_m5_vs_h1") or 0) >= SCORE_RANK_MIN_VOL_ACCEL
-        ]
-    else:  # pullback_rank
-        candidates = [
-            r for r in all_rows
-            if (r.get("r_h1") or 0) >= 0.5  # at least some h1 gain
-            and (r.get("r_m5") or 0) <= 0   # currently dipping
-            and (r.get("buy_count_ratio_m5") or 0) >= SCORE_RANK_MIN_BUY_RATIO
-        ]
+    # v1.10: include pumpfun_mature; exclude only pumpfun_early
+    mature_rows = [r for r in all_rows if classify_lane(r) != "pumpfun_early"]
+
+    # v1.11 P1: NO hard AND gate — all mature tokens are candidates.
+    # Score handles signal strength continuously. Only hard safety gates apply:
+    #   - r_m5 <= R_M5_CHASE_CAP (anti-chase, applied inside open_trade)
+    #   - lane/liq/vol/friction/rug gates (applied inside open_trade)
+    # Soft preference: tokens with r_m5 < 0 (pullback) score higher via z_depth.
+    candidates = mature_rows  # all mature tokens are candidates
 
     if not candidates:
+        # P3: detailed no-candidate diagnostic
         logger.info(
-            f"RANK {strategy}: no qualifying candidates "
-            f"(universe_size={len(all_rows)}, floors: buy_ratio>={SCORE_RANK_MIN_BUY_RATIO} "
-            f"vol_accel>={SCORE_RANK_MIN_VOL_ACCEL})"
+            f"RANK {strategy}: NO CANDIDATES "
+            f"(universe={len(all_rows)} mature={len(mature_rows)} "
+            f"pumpfun_early_blocked={sum(1 for r in all_rows if classify_lane(r)=='pumpfun_early')})"
         )
+        _last_rank_entry[strategy] = now
         return None
 
-    # Pick top candidate by score
-    best = max(candidates, key=score_fn)
-    best_score = score_fn(best)
-    # Update timer BEFORE open_trade so interval is always respected
-    # (even if open_trade returns None due to position cap)
+    # Score all candidates, pick top-1
+    scored = [(score_fn(r), r) for r in candidates]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = scored[0]
+
+    # P3: log top-3 candidates for diagnostics
+    top3 = scored[:3]
+    top3_str = "  ".join(
+        f"{r.get('token_symbol','?')}(sc={sc:.2f} r_m5={r.get('r_m5') or 0:.2f}% r_h1={r.get('r_h1') or 0:.2f}%)"
+        for sc, r in top3
+    )
+    logger.info(
+        f"RANK {strategy}: top-3 candidates [{top3_str}] "
+        f"universe={len(all_rows)} mature={len(mature_rows)}"
+    )
+
     _last_rank_entry[strategy] = now
     logger.info(
-        f"RANK {strategy}: firing top-1 candidate "
+        f"RANK {strategy}: firing top-1 "
         f"{best.get('token_symbol','?')} ({best.get('mint_address','?')[:8]}) "
         f"score={best_score:.4f} "
         f"r_m5={best.get('r_m5') or 0:.2f}% r_h1={best.get('r_h1') or 0:.2f}% "
+        f"rv_5m={best.get('rv_5m') or 0:.4f}% "
         f"buy_ratio={best.get('buy_count_ratio_m5') or 0:.2f} "
-        f"pool_type={best.get('pool_type','?')}"
+        f"lane={classify_lane(best)} pumpfun={best.get('pumpfun_origin',0)}"
     )
-    tid = open_trade(strategy, best)
+    tid = open_trade(strategy, best, entry_score=best_score)
     if tid:
         logger.info(f"RANK {strategy}: entry opened trade_id={tid[:8]}")
-        # Matched baseline for rank entry
-        baseline_strat = f"baseline_matched_{strategy}"
-        if passes_position_cap(baseline_strat):
-            baseline_row = random.choice(all_rows)
-            open_trade(baseline_strat, baseline_row, baseline_trigger_id=tid)
+        # P4: Matched baseline — random from mature universe, must succeed 1:1
+        baseline_strat = "baseline_matched_pullback_score_rank"
+        if passes_position_cap(baseline_strat) and mature_rows:
+            baseline_row = random.choice(mature_rows)
+            btid = open_trade(baseline_strat, baseline_row, baseline_trigger_id=tid)
+            if not btid:
+                # P4: baseline failed — mark strategy trade as invalid_pair
+                logger.warning(f"RANK {strategy}: baseline open FAILED for trigger={tid[:8]} — marking invalid_pair")
+                try:
+                    conn = get_conn()
+                    conn.execute("UPDATE shadow_trades_v1 SET invalid_pair=1 WHERE trade_id=?", (tid,))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"invalid_pair mark failed: {e}")
+    else:
+        # P3: open_trade rejected top-1 — log why (gates fired inside open_trade)
+        logger.info(f"RANK {strategy}: top-1 {best.get('token_symbol','?')} rejected by open_trade gates")
     return tid
 
 # ── OPEN TRADE ────────────────────────────────────────────────────────────────
-def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None) -> str | None:
+def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None, entry_score: float | None = None) -> str | None:
     """
     Open a shadow trade. Returns trade_id on success, None if blocked.
-    Checks: position cap → Jupiter friction gate → insert.
+    Checks: position cap → P0 pumpfun gate → P1 anti-chase → lane gates → rug filters → Jupiter → insert.
     """
-    if not passes_position_cap(strategy):
+    # Baseline trades are virtual controls — exempt from ALL position cap checks.
+    # They must always open 1:1 with the strategy trade; blocking them creates invalid_pair.
+    is_baseline = baseline_trigger_id is not None
+    if not is_baseline and not passes_position_cap(strategy):
         logger.debug(f"SKIP {strategy}: position cap reached")
         return None
 
-    # ── HARD LANE GATES ───────────────────────────────────────────────────────
+    # ── P0: LANE ELIGIBILITY CHECK (v1.10) ─────────────────────────────────────────
+    # pumpfun_early is always blocked.
+    # pumpfun_mature is eligible but requires extra stability gates (checked below).
+    # non_pumpfun_mature and large_cap_ray: standard gates only.
+    lane_check = classify_lane(row)
+    if lane_check == "pumpfun_early":
+        _filter_scan_counts["pumpfun_excluded"] = _filter_scan_counts.get("pumpfun_excluded", 0) + 1
+        logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: pumpfun_early (age={row.get('age_hours',0):.1f}h < {PF_MATURE_MIN_AGE_H}h)")
+        return None
+
+    # ── P1: ANTI-CHASE FILTER (v1.9) ───────────────────────────────────────────────
+    # Block ALL long entries when r_m5 > R_M5_CHASE_CAP (1.0%).
+    # Does not apply to baseline trades (they model unfiltered selection).
+    if ANTI_CHASE_FILTER_ENABLED and not strategy.startswith("baseline_"):
+        r_m5_entry = row.get("r_m5") or 0
+        if r_m5_entry > R_M5_CHASE_CAP:
+            _filter_scan_counts["anti_chase"] = _filter_scan_counts.get("anti_chase", 0) + 1
+            log_filter_rejection(
+                strategy, row.get("mint_address", "?"), row.get("token_symbol", "?"),
+                "anti_chase", r_m5_entry, R_M5_CHASE_CAP,
+                classify_lane(row), row.get("age_hours"), row.get("liq_usd"), row.get("vol_h24")
+            )
+            logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: anti_chase r_m5={r_m5_entry:.2f}% > cap={R_M5_CHASE_CAP}%")
+            return None
+
+    # ── HARD LANE GATES ───────────────────────────────────────────────────────────
     # Applied to ALL strategies (strict + rank). Prevents rug-risk tokens.
     age_h   = row.get("age_hours") or 0
     liq_usd = row.get("liq_usd")   or 0
     vol_24h = row.get("vol_h24")   or 0
     if age_h < LANE_GATE_MIN_AGE_H:
+        _filter_scan_counts["lane_age"] = _filter_scan_counts.get("lane_age", 0) + 1
         logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: age {age_h:.1f}h < {LANE_GATE_MIN_AGE_H}h gate")
         return None
     if liq_usd < LANE_GATE_MIN_LIQ_USD:
+        _filter_scan_counts["lane_liq"] = _filter_scan_counts.get("lane_liq", 0) + 1
         logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: liq ${liq_usd:,.0f} < ${LANE_GATE_MIN_LIQ_USD:,} gate")
         return None
     if vol_24h < LANE_GATE_MIN_VOL_24H:
+        _filter_scan_counts["lane_vol"] = _filter_scan_counts.get("lane_vol", 0) + 1
         logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: vol24h ${vol_24h:,.0f} < ${LANE_GATE_MIN_VOL_24H:,} gate")
         return None
+    # ── CRASH / RUG RISK FILTERS (v1.7) ──────────────────────────────────────
+    # Applied after lane gates, before Jupiter friction gate.
+    # Baseline trades are NOT filtered (they model unfiltered random selection).
+    if not strategy.startswith("baseline_"):
+        is_risky, rug_reason = check_rug_risk(row, strategy)
+        if is_risky:
+            logger.info(f"SKIP {strategy} {row.get('token_symbol','?')} ({row.get('mint_address','?')[:8]}): rug_filter={rug_reason}")
+            return None
 
     lane = classify_lane(row)
     mint = row["mint_address"]
+
+    # ── PUMPFUN_MATURE STABILITY GATES (v1.10) ────────────────────────────────────
+    # Applied only to pumpfun_mature tokens. Baseline trades bypass.
+    if lane == "pumpfun_mature" and not strategy.startswith("baseline_"):
+        rv5m_check  = row.get("rv_5m") or None
+        range5m     = row.get("range_5m") or None
+        # Gate 1: rv_5m must be available and <= PF_MATURE_RV5M_MAX
+        if rv5m_check is None:
+            logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: pumpfun_mature rv_5m unavailable")
+            return None
+        if rv5m_check > PF_MATURE_RV5M_MAX:
+            logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: pumpfun_mature rv_5m={rv5m_check:.3f}% > {PF_MATURE_RV5M_MAX}%")
+            log_filter_rejection(strategy, mint, row.get('token_symbol','?'), "pf_mature_rv5m",
+                rv5m_check, PF_MATURE_RV5M_MAX, lane, age_h, liq_usd, vol_24h)
+            return None
+        # Gate 2: range_5m <= PF_MATURE_RANGE_MULT * rv_5m
+        if range5m is not None and rv5m_check > 0:
+            if range5m > PF_MATURE_RANGE_MULT * rv5m_check:
+                logger.debug(f"SKIP {strategy} {row.get('token_symbol','?')}: pumpfun_mature range_5m={range5m:.3f}% > {PF_MATURE_RANGE_MULT}x rv_5m")
+                log_filter_rejection(strategy, mint, row.get('token_symbol','?'), "pf_mature_range",
+                    range5m, PF_MATURE_RANGE_MULT * rv5m_check, lane, age_h, liq_usd, vol_24h)
+                return None
+        # Gate 3: no active risk flags (sell_ratio_spike, liq_drop_proxy, vol_h1_spike)
+        # check_rug_risk already ran above; if we reach here, no flags fired.
+        # (rug filters are applied to all non-baseline strategies before this block)
+
+    # ── VOL NO-TRADE FILTER (v1.8) ────────────────────────────────────────────
+    # Skip entry if realized vol is too high for our bankroll to absorb the SL.
+    # Baseline trades bypass this filter (they model unfiltered random selection).
+    if not strategy.startswith("baseline_") and ADAPTIVE_EXITS_ENABLED:
+        rv5m = get_rv5m_for_mint(mint)
+        if rv5m is not None and (K_SL * rv5m) > VOL_CAP_PCT:
+            reason = f"vol_no_trade: K_SL*rv_5m={K_SL*rv5m:.2f}% > cap={VOL_CAP_PCT}% (rv_5m={rv5m:.4f}%)"
+            logger.info(f"SKIP {strategy} {row.get('token_symbol','?')} ({mint[:8]}): {reason}")
+            log_filter_rejection(
+                strategy, mint, row.get('token_symbol','?'), "vol_no_trade",
+                K_SL * rv5m, VOL_CAP_PCT, lane, age_h, liq_usd, vol_24h
+            )
+            return None
 
     liq_b_for_jup  = row.get("liq_base") or 0
     liq_q_for_jup  = row.get("liq_quote_sol") or 0
@@ -690,7 +1222,23 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
     trade_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
+    # ── Compute adaptive SL/TP for this trade (v1.8) ─────────────────────────
+    rv5m_entry = get_rv5m_for_mint(mint)
+    rt_floor   = rt["total_friction"]
+    entry_sl, entry_tp = compute_adaptive_exits(rt_floor, rv5m_entry)
+    # Baseline trades always use fixed exits for clean comparison
+    if strategy.startswith("baseline_"):
+        entry_sl, entry_tp = EXIT_STOP_LOSS_PCT, EXIT_TAKE_PROFIT_PCT
+
     conn = get_conn()
+    # Migrate entry_sl_pct / entry_tp_pct / entry_rv5m columns if missing
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(shadow_trades_v1)")}
+    for col, ctype in [("entry_sl_pct", "REAL"), ("entry_tp_pct", "REAL"), ("entry_rv5m", "REAL")]:
+        if col not in existing_cols:
+            try:
+                conn.execute(f"ALTER TABLE shadow_trades_v1 ADD COLUMN {col} {ctype}")
+            except Exception:
+                pass
     conn.execute("""
         INSERT INTO shadow_trades_v1
         (trade_id, strategy, mint_address, token_symbol, pair_address,
@@ -702,8 +1250,10 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
          entry_avg_trade_usd,
          baseline_trigger_id, mode, status,
          lane, age_at_entry_h, liq_usd_at_entry, vol_24h_at_entry,
-         pool_type_at_entry, venue_at_entry, spam_flag_at_entry)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         pool_type_at_entry, venue_at_entry, spam_flag_at_entry,
+         entry_sl_pct, entry_tp_pct, entry_rv5m,
+         run_id, git_commit, lane_at_entry, entry_score)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         trade_id, strategy, mint,
         row.get("token_symbol"), row.get("pair_address"),
@@ -719,19 +1269,59 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None)
         baseline_trigger_id, MODE, "open",
         lane, age_h, liq_usd, vol_24h,
         row.get("pool_type"), row.get("venue"), row.get("spam_flag"),
+        round(entry_sl, 4), round(entry_tp, 4), round(rv5m_entry, 6) if rv5m_entry else None,
+        _RUN_ID, _GIT_COMMIT, lane, entry_score,
     ))
     conn.commit()
     conn.close()
 
+    # Store adaptive thresholds in memory for fast exit checking
+    _adaptive_thresholds[trade_id] = {"sl_pct": entry_sl, "tp_pct": entry_tp}
+
     logger.info(
         f"OPEN {strategy} {row.get('token_symbol','?')} ({mint[:8]}...) "
         f"lane={lane} age={age_h:.1f}h liq=${liq_usd:,.0f} "
-        f"jup_rt={jup_rt*100:.2f}% cpamm_rt={rt['total_friction']*100:.2f}%"
+        f"jup_rt={jup_rt*100:.2f}% cpamm_rt={rt['total_friction']*100:.2f}% "
+        f"SL={entry_sl:+.2f}% TP={entry_tp:+.2f}% rv5m={rv5m_entry:.4f}%" if rv5m_entry else
+        f"OPEN {strategy} {row.get('token_symbol','?')} ({mint[:8]}...) "
+        f"lane={lane} age={age_h:.1f}h liq=${liq_usd:,.0f} "
+        f"jup_rt={jup_rt*100:.2f}% cpamm_rt={rt['total_friction']*100:.2f}% "
+        f"SL={entry_sl:+.2f}% TP={entry_tp:+.2f}% rv5m=warmup"
         + (f" [triggered_by={baseline_trigger_id[:8]}]" if baseline_trigger_id else "")
     )
     return trade_id
 
-# ── CLOSE TRADE ───────────────────────────────────────────────────────────────
+def _register_run():
+    """P0: Write one row to run_registry at process start."""
+    import json
+    key_params = json.dumps({
+        "mode": MODE,
+        "sl": EXIT_STOP_LOSS_PCT,
+        "tp": EXIT_TAKE_PROFIT_PCT,
+        "timeout_min": EXIT_MAX_HOLD_MINUTES,
+        "k_sl": K_SL,
+        "k_tp": K_TP,
+        "vol_cap": VOL_CAP_PCT,
+        "interval_sec": SCORE_RANK_INTERVAL_SEC,
+        "r_m5_chase_cap": R_M5_CHASE_CAP,
+        "pf_mature_min_age_h": PF_MATURE_MIN_AGE_H,
+        "pf_mature_rv5m_max": PF_MATURE_RV5M_MAX,
+    })
+    lane_gates = f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% non_pumpfun_mature=OK large_cap_ray=OK"
+    try:
+        conn = get_conn()
+        conn.execute("""
+            INSERT OR IGNORE INTO run_registry
+            (run_id, git_commit, start_ts, mode, version, lane_gates, key_params)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (_RUN_ID, _GIT_COMMIT, datetime.datetime.utcnow().isoformat(), MODE, "v1.11", lane_gates, key_params))
+        conn.commit()
+        conn.close()
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.11 mode={MODE}")
+    except Exception as e:
+        logger.error(f"run_registry insert failed: {e}")
+
+# ── CLOSE TRADE ──────────────────────────────────────────────────────────────
 def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = None):
     entry_price = trade["entry_price_usd"]
     exit_price  = current["price_usd"]
@@ -859,6 +1449,24 @@ def check_exits(open_trades: list[dict]):
         hold_min = (now_utc - entered_at).total_seconds() / 60
         trade_id = trade["trade_id"]
 
+        # ── Adaptive SL/TP thresholds (v1.8) ─────────────────────────────────
+        # Use in-memory thresholds if available (set at entry).
+        # Fall back to DB columns, then fixed floors.
+        if trade_id in _adaptive_thresholds:
+            sl_threshold = _adaptive_thresholds[trade_id]["sl_pct"]
+            tp_threshold = _adaptive_thresholds[trade_id]["tp_pct"]
+        else:
+            # Recover from DB on restart
+            sl_db = trade.get("entry_sl_pct")
+            tp_db = trade.get("entry_tp_pct")
+            if sl_db is not None and tp_db is not None:
+                sl_threshold = sl_db
+                tp_threshold = tp_db
+                _adaptive_thresholds[trade_id] = {"sl_pct": sl_threshold, "tp_pct": tp_threshold}
+            else:
+                sl_threshold = EXIT_STOP_LOSS_PCT
+                tp_threshold = EXIT_TAKE_PROFIT_PCT
+
         # Track threshold-cross times and poll-gap data for overshoot audit
         cross = _threshold_cross_times.setdefault(trade_id, {"timeout_skipped": 0})
 
@@ -870,11 +1478,11 @@ def check_exits(open_trades: list[dict]):
         cross["curr_poll_at"]  = now_utc.isoformat()
         cross["curr_poll_pnl"] = gross_pnl_pct
 
-        if gross_pnl_pct <= EXIT_STOP_LOSS_PCT and "sl_crossed_at" not in cross:
+        if gross_pnl_pct <= sl_threshold and "sl_crossed_at" not in cross:
             cross["sl_crossed_at"]  = now_utc.isoformat()
             cross["sl_prev_poll_at"]  = prev_at
             cross["sl_prev_poll_pnl"] = prev_pnl
-        if gross_pnl_pct >= EXIT_TAKE_PROFIT_PCT and "tp_crossed_at" not in cross:
+        if gross_pnl_pct >= tp_threshold and "tp_crossed_at" not in cross:
             cross["tp_crossed_at"]  = now_utc.isoformat()
             cross["tp_prev_poll_at"]  = prev_at
             cross["tp_prev_poll_pnl"] = prev_pnl
@@ -883,6 +1491,7 @@ def check_exits(open_trades: list[dict]):
             # Hard max hold — always exit regardless of timeout filter
             close_trade(trade, current, "timeout", cross)
             _threshold_cross_times.pop(trade_id, None)
+            _adaptive_thresholds.pop(trade_id, None)
             continue
 
         if hold_min >= EXIT_MAX_HOLD_MINUTES:
@@ -900,14 +1509,17 @@ def check_exits(open_trades: list[dict]):
                 continue
             close_trade(trade, current, "timeout", cross)
             _threshold_cross_times.pop(trade_id, None)
+            _adaptive_thresholds.pop(trade_id, None)
             continue
-        if gross_pnl_pct >= EXIT_TAKE_PROFIT_PCT:
+        if gross_pnl_pct >= tp_threshold:
             close_trade(trade, current, "tp", cross)
             _threshold_cross_times.pop(trade_id, None)
+            _adaptive_thresholds.pop(trade_id, None)
             continue
-        if gross_pnl_pct <= EXIT_STOP_LOSS_PCT:
+        if gross_pnl_pct <= sl_threshold:
             close_trade(trade, current, "sl", cross)
             _threshold_cross_times.pop(trade_id, None)
+            _adaptive_thresholds.pop(trade_id, None)
             continue
         if EXIT_LIQ_CLIFF:
             entry_k = trade.get("entry_k_invariant")
@@ -917,6 +1529,7 @@ def check_exits(open_trades: list[dict]):
                 if cliff["lp_removal_flag"]:
                     close_trade(trade, current, "lp_removal", cross)
                     _threshold_cross_times.pop(trade_id, None)
+                    _adaptive_thresholds.pop(trade_id, None)
                     continue
 
         time.sleep(0.05)
@@ -930,15 +1543,22 @@ def run():
     logger.info(f"  Max open/strategy:     {MAX_OPEN_PER_STRATEGY}")
     if MODE == "live_sim_mode":
         logger.info(f"  Max open global:       {MAX_OPEN_GLOBAL}")
-    logger.info(f"  Exit TP/SL/timeout:    +{EXIT_TAKE_PROFIT_PCT}% / {EXIT_STOP_LOSS_PCT}% / {EXIT_MAX_HOLD_MINUTES}min")
+    logger.info(f"  Exit TP/SL/timeout:    +{EXIT_TAKE_PROFIT_PCT}% / {EXIT_STOP_LOSS_PCT}% / {EXIT_MAX_HOLD_MINUTES}min (fixed floors)")
+    logger.info(f"  Adaptive exits:        {'ENABLED' if ADAPTIVE_EXITS_ENABLED else 'DISABLED'} K_SL={K_SL} K_TP={K_TP} vol_cap={VOL_CAP_PCT}%")
     logger.info(f"  Friction gate (Jup):   <= {FRICTION_GATE_MAX_RT*100:.1f}% RT")
     logger.info(f"  LP cliff threshold:    {LP_CLIFF_THRESHOLD*100:.0f}% k-drop")
-    logger.info(f"  Momentum strict:       r_m5>={MOMENTUM_R_M5_MIN}% buy_ratio>={MOMENTUM_BUY_RATIO_MIN} vol_accel>={MOMENTUM_VOL_ACCEL_MIN} avg_trade>=${MOMENTUM_AVG_TRADE_USD_MIN}")
-    logger.info(f"  Pullback strict:       r_h1>={PULLBACK_R_H1_MIN}% r_m5<={PULLBACK_R_M5_MAX}% + confirm r_m5>={PULLBACK_CONFIRM_R_M5_MIN}% within {PULLBACK_CONFIRM_WINDOW_SEC}s")
-    logger.info(f"  Score/rank fallback:   {'ENABLED' if SCORE_RANK_ENABLED else 'DISABLED'} (interval={SCORE_RANK_INTERVAL_SEC}s, uses ALL eligible tokens)")
+    logger.info(f"  Momentum strict:       DISABLED (log-only, falsified)")
+    logger.info(f"  Pullback strict:       log-only (not trading)")
+    logger.info(f"  pullback_score_rank:   SOLE ACTIVE STRATEGY (interval={SCORE_RANK_INTERVAL_SEC}s top-1/hour)")
+    logger.info(f"  Anti-chase filter:     {'ENABLED' if ANTI_CHASE_FILTER_ENABLED else 'DISABLED'} r_m5_cap={R_M5_CHASE_CAP}%")
+    logger.info(f"  Lane split (v1.10):    pumpfun_early=BLOCKED pumpfun_mature=ELIGIBLE(rv5m<={PF_MATURE_RV5M_MAX}%) non_pumpfun_mature=OK large_cap_ray=OK")
+    logger.info(f"  run_id:                {_RUN_ID}")
+    logger.info(f"  git_commit:            {_GIT_COMMIT}")
     logger.info("=" * 65)
 
     init_tables()
+    _register_run()
+
 
     # Startup Jupiter health check
     _check_jup_health()
@@ -1019,13 +1639,20 @@ def run():
                 log_signal_frequency("momentum_strict", mom_signals, mom_opened, len(strict_rows))
                 log_signal_frequency("pullback_strict", pull_signals, pull_opened, len(strict_rows))
 
-            # 5. Score/rank fallback (ALL eligible tokens, fires at most 1/interval)
+            # 5. Score/rank: pullback_score_rank ONLY (v1.9 sole active strategy)
             if SCORE_RANK_ENABLED and all_rows:
                 try:
-                    maybe_fire_rank_entry("momentum_rank", all_rows, score_momentum)
-                    maybe_fire_rank_entry("pullback_rank", all_rows, score_pullback)
+                    maybe_fire_rank_entry("pullback_score_rank", all_rows, score_pullback_v19)
                 except Exception as rank_e:
                     logger.error(f"Score/rank error: {rank_e}", exc_info=True)
+
+            # 6. Log filter scan counts every cycle (P4)
+            _filter_scan_counts["evaluated"] = len(all_rows)
+            log_filter_scan(_filter_scan_counts)
+            # Reset per-cycle counters (keep evaluated as running total)
+            for k in list(_filter_scan_counts.keys()):
+                if k != "evaluated":
+                    _filter_scan_counts[k] = 0
 
             # Periodic status log
             if int(now_ts) % 300 < POLL_INTERVAL_SEC:  # ~every 5 min
