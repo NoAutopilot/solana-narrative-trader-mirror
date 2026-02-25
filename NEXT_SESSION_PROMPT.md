@@ -1,6 +1,6 @@
-# Solana ET Trader — Session Handoff Prompt (v1.4)
-**Last updated:** 2026-02-25 ~17:00 UTC  
-**GitHub:** `NoAutopilot/solana-narrative-trader` @ commit `8981eb7`  
+# Solana ET Trader — Session Handoff Prompt (v1.5)
+**Last updated:** 2026-02-25 ~18:00 UTC  
+**GitHub:** `NoAutopilot/solana-narrative-trader` @ commit `fa60b77`  
 **VPS:** `root@142.93.24.227` | Service: `solana-trader.service`  
 **DB:** `/root/solana_trader/data/solana_trader.db` → table `shadow_trades_v1`
 
@@ -23,7 +23,7 @@ python3 et_daily_report_v7.py
 |---|---|---|
 | universe_scanner | et_universe_scanner.py (v1.1) | Running |
 | microstructure | et_microstructure.py | Running |
-| shadow_trader_v1 | et_shadow_trader_v1.py (v1.4) | Running |
+| shadow_trader_v1 | et_shadow_trader_v1.py (v1.5) | Running |
 | pf_graduation | pf_graduation_stream.py | Running |
 
 **Old harness (`et_shadow_trader.py`) — RETIRED.**
@@ -47,23 +47,23 @@ python3 et_daily_report_v7.py
 | `momentum_rank` | Score/rank | top-1 per 30min, floors: r_m5≥0, buy_ratio≥0.25, vol_accel≥0.20 |
 | `pullback_rank` | Score/rank | top-1 per 30min, floors: r_h1≥0.5%, r_m5≤0, buy_ratio≥0.25 |
 
-Exits (unified): TP +4.0% / SL -2.0% / Timeout 12min / LP cliff 5% k-drop  
+Exits (unified): TP +4.0% / SL -2.0% / Timeout 12min / Hard max 30min / LP cliff 5% k-drop  
 Each variant has matched baseline: `baseline_matched_{variant}`
 
 ---
 
-## v1.4 Changes (This Session)
+## v1.5 Changes (This Session)
 
-1. **Adaptive exit polling**: `POLL_INTERVAL_SEC = 4` (was 15s). When any position is open: polls every 2s. Eliminates poll-gap SL overshoot (TripleT -13.97% in 14s was the worst case at 15s polling).
-2. **Timeout exit filter**: At timeout, skip exit if `gross < RT_floor + 0.25%` — avoids crystallizing fee-negative tiny wins.
-3. **Overshoot audit columns**: `sl_threshold_crossed_at`, `tp_threshold_crossed_at`, `exit_overshoot_pct`, `exit_overshoot_sec` — populated on every SL/TP exit going forward.
-4. **Report v7**: Section 5b OVERSHOOT AUDIT, worst trade shows overshoot detail, legacy fallback for old trades.
+1. **Poll-gap diagnosis columns**: `prev_poll_at`, `prev_poll_pnl_pct`, `curr_poll_at`, `curr_poll_pnl_pct` — stored at first threshold cross. Separates poll-gap delay from execution latency.
+2. **Hard max hold**: `HARD_MAX_HOLD_MINUTES = 30` — absolute cap, overrides timeout filter. Prevents indefinite holds.
+3. **Timeout skipped count**: `timeout_skipped_count` per trade — counts how many timeout checks were skipped by the filter.
+4. **Report v7 fixes**: Correct paired delta join direction (`b.baseline_trigger_id = s.trade_id`), poll-gap detail section, timeout_skipped per strategy.
 
 ---
 
-## Report v7 Findings (2026-02-25 17:00 UTC, 121 closed trades)
+## Report v7 Findings (2026-02-25 18:00 UTC, 141 closed trades)
 
-### Friction Floor (corrected and final)
+### Friction Floor (final)
 | Component | Value |
 |---|---|
 | DEX fee (RT) | 0.500% |
@@ -71,67 +71,70 @@ Each variant has matched baseline: `baseline_matched_{variant}`
 | **Total RT floor at 0.01 SOL** | **0.644%** |
 | Total RT floor at 0.02 SOL | 0.576% |
 
-### Per-Variant Status
-| Variant | n_closed | vs Baseline | Status |
-|---|---|---|---|
-| `momentum_rank` | 21 | DOES NOT BEAT (ev060=-1.39% vs baseline +0.80%) | QUALIFIED but failing |
-| `pullback_rank` | 15 | N/A | INSUFFICIENT_DATA |
-| `momentum_strict` | 19 | N/A | INSUFFICIENT_DATA |
-| `pullback_strict` | 19 | N/A | INSUFFICIENT_DATA |
+### Overshoot Audit (v1.5 data — new columns active)
+- **SL exits**: avg overshoot = -3.07%, avg_delay = **0.6s** ✅
+- **Worst trade**: NIRE -19.87% in 2s (0.9s detection) — genuine fast crash, not poll-gap
+- **Conclusion**: The exit mechanism is working. Overshoot is genuine fast crashes on pump.fun tokens, not a polling problem.
 
-### Exit Breakdown — Pre-fix (old 15s polling)
-- SL exits: avg -4% to -6% gross (target -2%) — overshoot audit will show improvement after v1.4 accumulates data
-- Timeout exits: avg +0.06% to +1.28% gross — below 0.64% RT floor; timeout filter now active
-- TP exits: avg +5% to +16% gross — only reliably profitable exit type
+### Per-Variant Paired Delta (CORRECT join direction)
+| Variant | n_pairs | delta_fee060 | delta_fee100 | Verdict |
+|---|---|---|---|---|
+| `momentum_strict` | 15 | -1.68% | -1.68% | DOES NOT BEAT |
+| `pullback_strict` | 10 | -1.27% | -1.27% | DOES NOT BEAT |
+| `momentum_rank` | 13 | -2.27% | -2.27% | DOES NOT BEAT |
+| `pullback_rank` | — | INSUFFICIENT_DATA (n=19) | — | — |
+
+**All strategies currently underperform their random baselines.** Entry signals are adding negative value vs random selection.
+
+### Exit Breakdown
+- **Timeout exits**: avg gross = +0.06% to +1.28% — below 0.644% RT floor → net negative (timeout filter now active)
+- **SL exits**: avg gross = -4.55% to -6.77% — genuine fast crashes (0.6s detection confirms)
+- **TP exits**: avg gross = +4.46% to +16.40% — profitable, but rare (2–6 per strategy)
 
 ### LIVE_CANARY_READY_V1: NO
-Blocking: `n_closed=121 < 150`, `momentum_rank does not beat baseline`, others INSUFFICIENT_DATA.
+Blocking: `n_closed=141 < 150`, no strategy beats matched baseline.
 
 ---
 
 ## P0 Actions for Next Session (in order)
 
-### 1. Verify overshoot audit is working
-After ~2h of v1.4 running, check that `exit_overshoot_sec` is being populated:
+### 1. Run report and check trade accumulation
+```bash
+cd /root/solana_trader && python3 et_daily_report_v7.py
+```
+
+### 2. Check if pullback_rank crossed n>=20
 ```bash
 python3 -c "
 import sqlite3
 from config.config import DB_PATH
 conn = sqlite3.connect(DB_PATH)
-rows = conn.execute('''
-  SELECT strategy, exit_reason, round(exit_overshoot_pct,3), exit_overshoot_sec
-  FROM shadow_trades_v1
-  WHERE exit_overshoot_pct IS NOT NULL
-  ORDER BY exited_at DESC LIMIT 20
-''').fetchall()
-for r in rows: print(r)
+for s in ['momentum_strict','pullback_strict','momentum_rank','pullback_rank']:
+    n = conn.execute('SELECT COUNT(*) FROM shadow_trades_v1 WHERE strategy=? AND status=\"closed\"', (s,)).fetchone()[0]
+    print(f'{s}: n={n}')
 "
 ```
-Expected: SL exits show `exit_overshoot_sec < 6s` (was up to 14s at 15s polling).
 
-### 2. Fix paired delta query bug
-Report shows "no matched pairs found (baseline_trigger_id not set)". Check:
-```bash
-python3 -c "
-import sqlite3
-from config.config import DB_PATH
-conn = sqlite3.connect(DB_PATH)
-rows = conn.execute('''
-  SELECT strategy, trade_id, baseline_trigger_id
-  FROM shadow_trades_v1
-  WHERE strategy LIKE 'baseline%'
-  ORDER BY entered_at DESC LIMIT 5
-''').fetchall()
-for r in rows: print(r)
-"
+### 3. Interpret the paired delta results
+After n≥20 per variant, check if any strategy beats its baseline under fee100.
+- If **paired delta > 0 under fee100**: entry signal has edge — proceed to stability check
+- If **paired delta still negative**: entry signal needs redesign, not more exit tuning
+
+### 4. Consider token age filter (if SL overshoot persists)
+The worst trades are pump.fun tokens with age < 2h. Consider:
+```python
+# In et_universe_scanner.py, add to pumpswap filter:
+token_age_hours = (now - created_at).total_seconds() / 3600
+if token_age_hours < 4:  # skip tokens < 4h old
+    continue
 ```
-If `baseline_trigger_id` is NULL for all rows, the harness is not storing it. Fix in `open_trade()` — after inserting baseline trade, update the strategy trade's `baseline_trigger_id` column.
 
-### 3. Re-evaluate momentum_rank after overshoot fix
-After 20+ new trades with v1.4 polling, re-run `et_daily_report_v7.py`. If paired delta is still negative under fee100, the entry signal needs redesign (not more exit tuning).
-
-### 4. pullback_strict signal starvation
-19 closed trades after a full day. Consider lowering `r_h1 >= 2.0%` to `1.5%` after 24h.
+### 5. Consider SL widening (if whipsaw is the issue)
+If most SL exits are legitimate fast crashes (not rugs), widen SL from -2% to -3%:
+```python
+# In config/config.py:
+SL_THRESHOLD_PCT = -0.03  # was -0.02
+```
 
 ---
 
@@ -152,9 +155,9 @@ No live canary with 0.14 SOL bankroll until gate passes.
 
 | File | Purpose |
 |---|---|
-| `et_shadow_trader_v1.py` (v1.4) | Main v1 harness — adaptive polling, overshoot audit |
+| `et_shadow_trader_v1.py` (v1.5) | Main v1 harness — adaptive polling, poll-gap columns, hard max hold |
 | `et_universe_scanner.py` (v1.1) | Universe scanner — large-cap + pumpswap lanes |
-| `et_daily_report_v7.py` | **USE THIS** — overshoot audit, paired delta, exit breakdown |
+| `et_daily_report_v7.py` | **USE THIS** — overshoot audit, paired delta (correct join), exit breakdown |
 | `et_microstructure.py` | 15s price/volume scanner |
 | `supervisor.py` | Systemd-managed process supervisor (v1 only) |
 | `config/config.py` | JUPITER_API_KEY, DB_PATH, TRADE_SIZE_SOL |
