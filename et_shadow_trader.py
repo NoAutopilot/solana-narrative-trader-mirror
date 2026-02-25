@@ -45,6 +45,20 @@ except ImportError:
         k_change = (k_new - k_old) / k_old
         return {"k_change_pct": k_change, "lp_removal_flag": k_change < -threshold}
 
+
+# ── Singleton lockfile guard ──────────────────────────────────────────────────
+import fcntl
+_LOCKFILE_PATH = "/tmp/et_shadow_trader.lock"
+_lockfile_fd = open(_LOCKFILE_PATH, "w")
+try:
+    fcntl.flock(_lockfile_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _lockfile_fd.write(str(os.getpid()))
+    _lockfile_fd.flush()
+except BlockingIOError:
+    print(f"[singleton] Another instance is running (lock held). Exiting.", flush=True)
+    import sys; sys.exit(0)
+# ─────────────────────────────────────────────────────────────────────────────
+
 from datetime import datetime, timezone
 from config.config import DB_PATH, LOGS_DIR
 
