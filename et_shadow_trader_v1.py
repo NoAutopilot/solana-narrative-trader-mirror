@@ -537,13 +537,19 @@ def init_tables():
         mode            TEXT,
         version         TEXT,
         lane_gates      TEXT,
-        key_params      TEXT
+        key_params      TEXT,
+        signature       TEXT
     )
     """)
 
     # v1.11 P4: invalid_pair column on shadow_trades_v1
     try:
         c.execute("ALTER TABLE shadow_trades_v1 ADD COLUMN invalid_pair INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    # v1.15: signature column on run_registry
+    try:
+        c.execute("ALTER TABLE run_registry ADD COLUMN signature TEXT")
     except Exception:
         pass
 
@@ -1579,6 +1585,35 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
     )
     return trade_id
 
+def _compute_run_signature() -> str:
+    """v1.15: Compute a stable sha256 hash of all strategy-defining parameters.
+    Two runs with identical signatures used the same config and can be safely pooled.
+    Excludes run_id, start_ts, git_commit (deployment metadata, not strategy config).
+    """
+    import json, hashlib
+    sig_params = {
+        "version": "v1.15",
+        "mode": MODE,
+        "sl_pct": EXIT_STOP_LOSS_PCT,
+        "tp_pct": EXIT_TAKE_PROFIT_PCT,
+        "timeout_min": EXIT_MAX_HOLD_MINUTES,
+        "k_sl": K_SL,
+        "k_tp": K_TP,
+        "vol_cap_pct": VOL_CAP_PCT,
+        "score_rank_interval_sec": SCORE_RANK_INTERVAL_SEC,
+        "r_m5_chase_cap": R_M5_CHASE_CAP,
+        "pf_mature_min_age_h": PF_MATURE_MIN_AGE_H,
+        "pf_mature_rv5m_max": PF_MATURE_RV5M_MAX,
+        "anti_chase_enabled": ANTI_CHASE_FILTER_ENABLED,
+        "lane_pumpfun_early": "BLOCKED",
+        "lane_pumpfun_mature": f"rv5m<={PF_MATURE_RV5M_MAX}",
+        "lane_non_pumpfun_mature": "OK",
+        "lane_large_cap_ray": "OK",
+    }
+    canonical = json.dumps(sig_params, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 def _register_run():
     """P0: Write one row to run_registry at process start."""
     import json
@@ -1596,17 +1631,18 @@ def _register_run():
         "pf_mature_rv5m_max": PF_MATURE_RV5M_MAX,
     })
     lane_gates = f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% non_pumpfun_mature=OK large_cap_ray=OK"
+    sig = _compute_run_signature()
     try:
         conn = get_conn()
         from datetime import datetime as _dt
         conn.execute("""
             INSERT OR IGNORE INTO run_registry
-            (run_id, git_commit, start_ts, mode, version, lane_gates, key_params)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.14", lane_gates, key_params))
+            (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.15", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.14 mode={MODE}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.15 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
