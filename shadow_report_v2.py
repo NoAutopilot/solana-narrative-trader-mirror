@@ -401,12 +401,30 @@ if mode in ("mini", "decision"):
     print("\n5) MFE/MAE ANALYSIS (v1.18+ price-path trades only)")
     print("-" * 70)
     # v1.18: use max_price_seen/min_price_seen for proof; fall back to mfe_gross_pct for v1.17 rows
-    pairs_with_mfe = [p for p in pairs if p["s_mfe"] is not None]
-    n_mfe = len(pairs_with_mfe)
-    if n_mfe == 0:
+    # All rows that have any MFE data
+    pairs_with_mfe_all = [p for p in pairs if p["s_mfe"] is not None]
+    # Exclude pre-fix rows: max_price_seen < entry_price_usd means MFE init bug
+    pairs_with_mfe = [
+        p for p in pairs_with_mfe_all
+        if not (
+            p["s_max_price"] is not None
+            and p["s_entry_price"] is not None
+            and p["s_entry_price"] > 0
+            and p["s_max_price"] < p["s_entry_price"]
+        )
+    ]
+    n_mfe_total = len(pairs_with_mfe_all)
+    n_mfe_excl  = n_mfe_total - len(pairs_with_mfe)
+    n_mfe       = len(pairs_with_mfe)
+    if n_mfe_total == 0:
         print("  No MFE/MAE data yet (requires v1.17+ trades; columns are NULL for older rows).")
         print("  Once v1.18 is deployed and trades close, this section will populate.")
     else:
+        excl_note = f"  ({n_mfe_excl} pre-fix row(s) excluded: max_price_seen < entry_price_usd)" if n_mfe_excl else ""
+        print(f"  mfe_valid_n / total_n : {n_mfe} / {n_mfe_total}{excl_note}")
+        if n_mfe == 0:
+            print("  All MFE rows are pre-fix. No valid data to aggregate yet.")
+    if n_mfe > 0:
         # Proof table: 5 sample trades showing price path
         proof_rows = [p for p in pairs_with_mfe if p["s_max_price"] is not None][:5]
         if proof_rows:
