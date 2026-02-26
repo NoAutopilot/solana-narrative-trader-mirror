@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.10
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.12
+
+v1.12 additions:
+  - selection_tick_log: one heartbeat row per 15-min interval with eligible_count,
+    tradeable_count, top_token, top_score, opened_trade_bool, reason_no_trade, rejection counts
+  - Tradeable set E: pre-validate all gates (lane+rug+vol+friction+Jupiter quote) before scoring
+  - Atomic pair open: baseline chosen from E\\{strategy}; if |E|<2, no trade
+  - Baseline bypasses ALL position caps and already-open checks (is_baseline flag)
+  - No min-score threshold in research_mode; always trade top-1 from E
 
 Strategy variants:
   momentum_strict  — strict threshold entries (r_m5>=0.8%, buy_ratio>=0.60, vol_accel>=1.5)
@@ -355,6 +363,34 @@ def init_tables():
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_strategy ON shadow_trades_v1(strategy, entered_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_status   ON shadow_trades_v1(status)")
     # Migrations for existing tables (v1.7 filter_rejection_log)
+    # v1.12: selection_tick_log heartbeat
+    try:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS selection_tick_log (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            logged_at           TEXT    NOT NULL,
+            run_id              TEXT,
+            eligible_count      INTEGER,
+            tradeable_count     INTEGER,
+            top_token           TEXT,
+            top_score           REAL,
+            opened_trade_bool   INTEGER DEFAULT 0,
+            reason_no_trade     TEXT,
+            rej_lane_age        INTEGER DEFAULT 0,
+            rej_lane_liq        INTEGER DEFAULT 0,
+            rej_lane_vol        INTEGER DEFAULT 0,
+            rej_lane_pf_early   INTEGER DEFAULT 0,
+            rej_anti_chase      INTEGER DEFAULT 0,
+            rej_friction        INTEGER DEFAULT 0,
+            rej_vol_cap         INTEGER DEFAULT 0,
+            rej_rug             INTEGER DEFAULT 0,
+            rej_jup_fail        INTEGER DEFAULT 0,
+            rej_pf_stability    INTEGER DEFAULT 0
+        )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_stl_at ON selection_tick_log(logged_at, run_id)")
+    except Exception:
+        pass
     try:
         c.execute("""
         CREATE TABLE IF NOT EXISTS filter_rejection_log (
@@ -744,12 +780,60 @@ def log_filter_scan(counts: dict):
     except Exception as e:
         logger.debug(f"filter_scan_log write error: {e}")
 
+def log_selection_tick(eligible_count: int, tradeable_count: int, top_token: str | None,
+                       top_score: float | None, opened: bool, reason_no_trade: str | None,
+                       rej: dict):
+    """v1.12: Write one heartbeat row per selection interval to selection_tick_log."""
+    try:
+        conn = get_conn()
+        conn.execute("""
+            INSERT INTO selection_tick_log
+            (logged_at, run_id, eligible_count, tradeable_count, top_token, top_score,
+             opened_trade_bool, reason_no_trade,
+             rej_lane_age, rej_lane_liq, rej_lane_vol, rej_lane_pf_early,
+             rej_anti_chase, rej_friction, rej_vol_cap, rej_rug, rej_jup_fail, rej_pf_stability)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now(timezone.utc).isoformat(), _RUN_ID,
+            eligible_count, tradeable_count, top_token, top_score,
+            1 if opened else 0, reason_no_trade,
+            rej.get("lane_age", 0), rej.get("lane_liq", 0), rej.get("lane_vol", 0), rej.get("lane_pf_early", 0),
+            rej.get("anti_chase", 0), rej.get("friction", 0), rej.get("vol_cap", 0),
+            rej.get("rug", 0), rej.get("jup_fail", 0), rej.get("pf_stability", 0),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"selection_tick_log write error: {e}")
+
 # ── LANE CLASSIFICATION ──────────────────────────────────────────────────────
 # Hard gates: tokens must pass ALL to be eligible for any strategy entry.
 # These are enforced in open_trade() before the friction gate.
 LANE_GATE_MIN_AGE_H    = 4.0       # hours — exclude fresh graduates
 LANE_GATE_MIN_LIQ_USD  = 100_000   # USD — minimum liquidity
 LANE_GATE_MIN_VOL_24H  = 250_000   # USD — minimum 24h volume
+
+# ── ANCHOR MINT LIST ─────────────────────────────────────────────────────────
+# Always-scanned mature tokens that bypass the universe scanner's eligible gate.
+# These are high-liquidity, non-pumpfun tokens that should always be in the
+# tradeable universe. Add/remove as needed.
+ANCHOR_MINTS = {
+    # Large-cap Raydium (age >= 30d, liq >= 1M)
+    "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # $WIF
+    "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82",   # BOME
+    "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",  # POPCAT
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # Bonk
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",   # JUP
+    "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4",  # RAY
+    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # WETH (Wormhole)
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  # mSOL
+    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",  # PYTH
+    "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",  # WBTC (Wormhole)
+    "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",   # ORCA
+    "A9mUU4qviSctJVPJdBJWkb28deg915LYJKrzQ19ji3FM",   # USDCet
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "So11111111111111111111111111111111111111112",     # SOL (wrapped)
+}
 
 def classify_lane(row: dict) -> str:
     """
@@ -1012,89 +1096,211 @@ def score_pullback_v19(row: dict) -> float:
     )
     return score
 
+def _check_tradeable(row: dict) -> tuple[bool, str]:
+    """
+    v1.12: Pre-validate all gates for a token (for strategy, not baseline).
+    Returns (tradeable: bool, reason: str).
+    Checks: lane, age, liq, vol, anti-chase, rug, pf_mature_stability, vol_cap, Jupiter.
+    Does NOT check position cap (that's strategy-level).
+    """
+    lane = classify_lane(row)
+    if lane == "pumpfun_early":
+        return False, "lane:pumpfun_early"
+    age_h   = row.get("age_hours") or 0
+    liq_usd = row.get("liq_usd") or 0
+    vol_24h = row.get("vol_h24") or 0
+    if age_h < LANE_GATE_MIN_AGE_H:
+        return False, "lane:age"
+    if liq_usd < LANE_GATE_MIN_LIQ_USD:
+        return False, "lane:liq"
+    if vol_24h < LANE_GATE_MIN_VOL_24H:
+        return False, "lane:vol"
+    # Anti-chase
+    if ANTI_CHASE_FILTER_ENABLED:
+        r_m5 = row.get("r_m5") or 0
+        if r_m5 > R_M5_CHASE_CAP:
+            return False, "anti_chase"
+    # Rug risk
+    if RUG_FILTER_ENABLED:
+        is_risky, rug_reason = check_rug_risk(row, "pullback_score_rank")
+        if is_risky:
+            return False, f"rug:{rug_reason}"
+    # pumpfun_mature stability gates
+    if lane == "pumpfun_mature":
+        rv5m_check = row.get("rv_5m")
+        if rv5m_check is None:
+            return False, "pf_stability:rv5m_missing"
+        if rv5m_check > PF_MATURE_RV5M_MAX:
+            return False, f"pf_stability:rv5m={rv5m_check:.3f}%>{PF_MATURE_RV5M_MAX}%"
+        range5m = row.get("range_5m")
+        if range5m is not None and rv5m_check > 0 and range5m > PF_MATURE_RANGE_MULT * rv5m_check:
+            return False, f"pf_stability:range_5m={range5m:.3f}%>{PF_MATURE_RANGE_MULT}xrv5m"
+    # Vol cap
+    if ADAPTIVE_EXITS_ENABLED:
+        mint = row.get("mint_address", "")
+        rv5m = get_rv5m_for_mint(mint)
+        if rv5m is not None and (K_SL * rv5m) > VOL_CAP_PCT:
+            return False, f"vol_cap:{K_SL*rv5m:.2f}%>{VOL_CAP_PCT}%"
+    # Jupiter friction gate — use cached round_trip_pct from universe_snapshot
+    # (universe scanner already validated Jupiter friction; no need to re-call at trade time)
+    cached_rt = row.get("round_trip_pct")
+    if cached_rt is None:
+        # No cached RT — fall back to live Jupiter call
+        mint = row.get("mint_address", "")
+        liq_b = row.get("liq_base") or 0
+        liq_q = row.get("liq_quote_sol") or 0
+        cpamm_valid = bool(row.get("cpamm_valid_flag", 1))
+        jup_rt = get_jupiter_rt_estimate(mint, liq_b, liq_q, cpamm_valid=cpamm_valid)
+        if jup_rt is None:
+            return False, "jup:no_route"
+        if jup_rt > FRICTION_GATE_MAX_RT:
+            return False, f"jup:rt={jup_rt*100:.2f}%>{FRICTION_GATE_MAX_RT*100:.1f}%"
+    else:
+        if cached_rt > FRICTION_GATE_MAX_RT:
+            return False, f"jup:rt={cached_rt*100:.2f}%>{FRICTION_GATE_MAX_RT*100:.1f}%"
+    return True, "ok"
+
+
 def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str | None:
     """
-    v1.9: Only fires for pullback_score_rank (sole active strategy).
-    All other strategies are log-only — this function returns None for them.
-    Applies P0 (pumpfun exclusion) and P1 (anti-chase) gates to candidate pool.
+    v1.12: Build tradeable set E, require |E|>=2, pick strategy=top-score,
+    baseline=random from E\{strategy}. Open both atomically.
+    Writes selection_tick_log heartbeat every interval regardless of outcome.
     """
     if not SCORE_RANK_ENABLED:
         return None
-    # v1.9: only pullback_score_rank opens trades
     if strategy not in ("pullback_score_rank", "baseline_matched_pullback_score_rank"):
         return None
     now = time.time()
     last = _last_rank_entry.get(strategy, 0)
     if now - last < SCORE_RANK_INTERVAL_SEC:
         return None  # Not time yet
+    _last_rank_entry[strategy] = now
 
-    # v1.10: include pumpfun_mature; exclude only pumpfun_early
-    mature_rows = [r for r in all_rows if classify_lane(r) != "pumpfun_early"]
+    # ── Build tradeable set E ──────────────────────────────────────────────────
+    eligible_rows = [r for r in all_rows if classify_lane(r) != "pumpfun_early"]
+    rej_counts = {"lane_age": 0, "lane_liq": 0, "lane_vol": 0, "lane_pf_early": 0, "anti_chase": 0, "friction": 0, "vol_cap": 0, "rug": 0, "jup_fail": 0, "pf_stability": 0}
+    tradeable_set = []
+    for r in eligible_rows:
+        ok, reason = _check_tradeable(r)
+        if ok:
+            tradeable_set.append(r)
+        else:
+            if reason == "lane:age":
+                rej_counts["lane_age"] += 1
+            elif reason == "lane:liq":
+                rej_counts["lane_liq"] += 1
+            elif reason == "lane:vol":
+                rej_counts["lane_vol"] += 1
+            elif reason == "lane:pumpfun_early":
+                rej_counts["lane_pf_early"] += 1
+            elif reason.startswith("lane"):
+                rej_counts["lane_age"] += 1  # fallback
+            elif reason == "anti_chase":
+                rej_counts["anti_chase"] += 1
+            elif reason.startswith("jup"):
+                rej_counts["jup_fail"] += 1
+            elif reason.startswith("vol_cap"):
+                rej_counts["vol_cap"] += 1
+            elif reason.startswith("rug"):
+                rej_counts["rug"] += 1
+            elif reason.startswith("pf_stability"):
+                rej_counts["pf_stability"] += 1
+            else:
+                rej_counts["friction"] += 1
 
-    # v1.11 P1: NO hard AND gate — all mature tokens are candidates.
-    # Score handles signal strength continuously. Only hard safety gates apply:
-    #   - r_m5 <= R_M5_CHASE_CAP (anti-chase, applied inside open_trade)
-    #   - lane/liq/vol/friction/rug gates (applied inside open_trade)
-    # Soft preference: tokens with r_m5 < 0 (pullback) score higher via z_depth.
-    candidates = mature_rows  # all mature tokens are candidates
-
-    if not candidates:
-        # P3: detailed no-candidate diagnostic
-        logger.info(
-            f"RANK {strategy}: NO CANDIDATES "
-            f"(universe={len(all_rows)} mature={len(mature_rows)} "
-            f"pumpfun_early_blocked={sum(1 for r in all_rows if classify_lane(r)=='pumpfun_early')})"
+    # ── Log diagnostics ────────────────────────────────────────────────────────
+    if tradeable_set:
+        scored = [(score_fn(r), r) for r in tradeable_set]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top3_str = "  ".join(
+            f"{r.get('token_symbol','?')}(sc={sc:.2f} r_m5={r.get('r_m5') or 0:.2f}%)"
+            for sc, r in scored[:3]
         )
-        _last_rank_entry[strategy] = now
+        logger.info(
+            f"RANK {strategy}: tradeable={len(tradeable_set)}/{len(eligible_rows)} "
+            f"eligible={len(all_rows)} top-3=[{top3_str}] "
+            f"rej=age:{rej_counts['lane_age']} liq:{rej_counts['lane_liq']} vol:{rej_counts['lane_vol']} pf_early:{rej_counts['lane_pf_early']} "
+            f"anti_chase:{rej_counts['anti_chase']} jup:{rej_counts['jup_fail']} vol_cap:{rej_counts['vol_cap']} rug:{rej_counts['rug']} pf_stab:{rej_counts['pf_stability']}"
+        )
+    else:
+        logger.info(
+            f"RANK {strategy}: NO TRADEABLE TOKENS "
+            f"(eligible={len(eligible_rows)} universe={len(all_rows)} "
+            f"rej=age:{rej_counts['lane_age']} liq:{rej_counts['lane_liq']} vol:{rej_counts['lane_vol']} pf_early:{rej_counts['lane_pf_early']} "
+            f"anti_chase:{rej_counts['anti_chase']} jup:{rej_counts['jup_fail']} vol_cap:{rej_counts['vol_cap']} rug:{rej_counts['rug']} pf_stab:{rej_counts['pf_stability']})"
+        )
+        # Near-miss top-5: show tokens closest to passing, sorted by liq_usd desc
+        near_miss = sorted(eligible_rows, key=lambda r: r.get("liq_usd") or 0, reverse=True)[:5]
+        for nm in near_miss:
+            sym = nm.get("token_symbol", "?")
+            age_h_nm = nm.get("age_hours") or 0
+            liq_nm = nm.get("liq_usd") or 0
+            vol_nm = nm.get("vol_h24") or 0
+            r_m5_nm = nm.get("r_m5") or 0
+            rv5m_nm = nm.get("rv_5m") or 0
+            # Compute pairCreatedAt for unit sanity
+            pair_ts = nm.get("pair_created_at") or nm.get("pairCreatedAt") or "?"
+            logger.info(
+                f"  NEAR-MISS {sym}: age={age_h_nm:.1f}h liq=${liq_nm:,.0f} "
+                f"vol24h=${vol_nm:,.0f} r_m5={r_m5_nm:.2f}% rv5m={rv5m_nm:.3f}% "
+                f"pairCreatedAt={pair_ts}"
+            )
+        log_selection_tick(len(eligible_rows), 0, None, None, False, "no_tradeable_tokens", rej_counts)
         return None
 
-    # Score all candidates, pick top-1
-    scored = [(score_fn(r), r) for r in candidates]
-    scored.sort(key=lambda x: x[0], reverse=True)
+    # ── Require |E| >= 2 ──────────────────────────────────────────────────────
+    if len(tradeable_set) < 2:
+        only = tradeable_set[0].get("token_symbol", "?")
+        logger.info(f"RANK {strategy}: |E|={len(tradeable_set)} < 2 — skipping (need baseline slot)")
+        log_selection_tick(len(eligible_rows), len(tradeable_set), only, scored[0][0], False, "tradeable_lt_2", rej_counts)
+        return None
+
+    # ── Pick strategy = top-score, baseline = random from E\{strategy} ────────
     best_score, best = scored[0]
+    best_mint = best.get("mint_address", "")
+    baseline_pool = [r for r in tradeable_set if r.get("mint_address") != best_mint] or tradeable_set
+    baseline_row = random.choice(baseline_pool)
 
-    # P3: log top-3 candidates for diagnostics
-    top3 = scored[:3]
-    top3_str = "  ".join(
-        f"{r.get('token_symbol','?')}(sc={sc:.2f} r_m5={r.get('r_m5') or 0:.2f}% r_h1={r.get('r_h1') or 0:.2f}%)"
-        for sc, r in top3
-    )
-    logger.info(
-        f"RANK {strategy}: top-3 candidates [{top3_str}] "
-        f"universe={len(all_rows)} mature={len(mature_rows)}"
-    )
-
-    _last_rank_entry[strategy] = now
     logger.info(
         f"RANK {strategy}: firing top-1 "
-        f"{best.get('token_symbol','?')} ({best.get('mint_address','?')[:8]}) "
-        f"score={best_score:.4f} "
-        f"r_m5={best.get('r_m5') or 0:.2f}% r_h1={best.get('r_h1') or 0:.2f}% "
-        f"rv_5m={best.get('rv_5m') or 0:.4f}% "
-        f"buy_ratio={best.get('buy_count_ratio_m5') or 0:.2f} "
-        f"lane={classify_lane(best)} pumpfun={best.get('pumpfun_origin',0)}"
+        f"{best.get('token_symbol','?')} ({best_mint[:8]}) "
+        f"score={best_score:.4f} r_m5={best.get('r_m5') or 0:.2f}% "
+        f"lane={classify_lane(best)} | baseline={baseline_row.get('token_symbol','?')}"
     )
+
+    # ── Check position cap for strategy (baseline always exempt) ──────────────
+    if not passes_position_cap(strategy):
+        logger.info(f"RANK {strategy}: position cap reached — skipping this interval")
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "position_cap", rej_counts)
+        return None
+
+    # ── Open strategy trade ────────────────────────────────────────────────────
     tid = open_trade(strategy, best, entry_score=best_score)
-    if tid:
-        logger.info(f"RANK {strategy}: entry opened trade_id={tid[:8]}")
-        # P4: Matched baseline — random from mature universe, must succeed 1:1
-        baseline_strat = "baseline_matched_pullback_score_rank"
-        if passes_position_cap(baseline_strat) and mature_rows:
-            baseline_row = random.choice(mature_rows)
-            btid = open_trade(baseline_strat, baseline_row, baseline_trigger_id=tid)
-            if not btid:
-                # P4: baseline failed — mark strategy trade as invalid_pair
-                logger.warning(f"RANK {strategy}: baseline open FAILED for trigger={tid[:8]} — marking invalid_pair")
-                try:
-                    conn = get_conn()
-                    conn.execute("UPDATE shadow_trades_v1 SET invalid_pair=1 WHERE trade_id=?", (tid,))
-                    conn.commit()
-                    conn.close()
-                except Exception as e:
-                    logger.error(f"invalid_pair mark failed: {e}")
+    if not tid:
+        logger.warning(f"RANK {strategy}: strategy open_trade returned None unexpectedly")
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "strategy_open_failed", rej_counts)
+        return None
+
+    # ── Open baseline (EXEMPT from all position caps) ─────────────────────────
+    baseline_strat = "baseline_matched_pullback_score_rank"
+    btid = open_trade(baseline_strat, baseline_row, baseline_trigger_id=tid)
+    if not btid:
+        logger.warning(f"RANK {strategy}: baseline open FAILED post-validation for trigger={tid[:8]} — marking invalid_pair")
+        try:
+            conn = get_conn()
+            conn.execute("UPDATE shadow_trades_v1 SET invalid_pair=1 WHERE trade_id=?", (tid,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"invalid_pair mark failed: {e}")
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "baseline_open_failed", rej_counts)
     else:
-        # P3: open_trade rejected top-1 — log why (gates fired inside open_trade)
-        logger.info(f"RANK {strategy}: top-1 {best.get('token_symbol','?')} rejected by open_trade gates")
+        logger.info(
+            f"RANK {strategy}: PAIR OPENED strategy={tid[:8]} baseline={btid[:8]} "
+            f"strategy_token={best.get('token_symbol','?')} baseline_token={baseline_row.get('token_symbol','?')}"
+        )
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, True, None, rej_counts)
     return tid
 
 # ── OPEN TRADE ────────────────────────────────────────────────────────────────
@@ -1310,14 +1516,15 @@ def _register_run():
     lane_gates = f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% non_pumpfun_mature=OK large_cap_ray=OK"
     try:
         conn = get_conn()
+        from datetime import datetime as _dt
         conn.execute("""
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, datetime.datetime.utcnow().isoformat(), MODE, "v1.11", lane_gates, key_params))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.12", lane_gates, key_params))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.11 mode={MODE}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.12 mode={MODE}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
