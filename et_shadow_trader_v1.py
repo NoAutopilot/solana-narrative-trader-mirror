@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.13
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.16
 
 v1.14 additions (2026-02-26):
   - Rollover cleanup on startup: open trades from old run_ids are closed with
@@ -1586,13 +1586,13 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
     return trade_id
 
 def _compute_run_signature() -> str:
-    """v1.15: Compute a stable sha256 hash of all strategy-defining parameters.
+    """v1.16: Compute a stable sha256 hash of all strategy-defining parameters.
     Two runs with identical signatures used the same config and can be safely pooled.
     Excludes run_id, start_ts, git_commit (deployment metadata, not strategy config).
     """
     import json, hashlib
     sig_params = {
-        "version": "v1.15",
+        "version": "v1.16",
         "mode": MODE,
         "sl_pct": EXIT_STOP_LOSS_PCT,
         "tp_pct": EXIT_TAKE_PROFIT_PCT,
@@ -1639,10 +1639,10 @@ def _register_run():
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.15", lane_gates, key_params, sig))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.16", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.15 mode={MODE} signature={sig}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.16 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
@@ -1972,36 +1972,26 @@ def run():
                 if not mint:
                     continue
 
-                # ── Momentum strict ──
+                # ── Momentum strict (LOG-ONLY v1.16: bypasses atomic pairing, disabled) ──
                 if should_enter_momentum_strict(row):
                     mom_signals += 1
-                    tid = open_trade("momentum_strict", row)
-                    if tid:
-                        mom_opened += 1
-                        # Matched baseline
-                        if passes_position_cap("baseline_matched_momentum_strict"):
-                            baseline_row = random.choice(strict_rows)
-                            open_trade("baseline_matched_momentum_strict", baseline_row, baseline_trigger_id=tid)
+                    # v1.16: open_trade disabled — pullback_score_rank is SOLE active strategy
+                    logger.debug(f"[LOG-ONLY] momentum_strict signal: {row.get('token_symbol','?')} (not opened)")
 
-                # ── Pullback strict (two-stage) ──
+                # ── Pullback strict (LOG-ONLY v1.16: bypasses atomic pairing, disabled) ──
                 if mint in _pullback_pending:
                     # Confirmation stage
                     if should_confirm_pullback(row):
                         del _pullback_pending[mint]
                         pull_signals += 1
-                        tid = open_trade("pullback_strict", row)
-                        if tid:
-                            pull_opened += 1
-                            # Matched baseline
-                            if passes_position_cap("baseline_matched_pullback_strict"):
-                                baseline_row = random.choice(strict_rows)
-                                open_trade("baseline_matched_pullback_strict", baseline_row, baseline_trigger_id=tid)
+                        # v1.16: open_trade disabled — pullback_score_rank is SOLE active strategy
+                        logger.debug(f"[LOG-ONLY] pullback_strict confirm: {row.get('token_symbol','?')} (not opened)")
                 else:
                     # Initial signal stage
                     if should_enter_pullback_initial(row):
                         _pullback_pending[mint] = now_ts
                         pull_signals += 1
-                        logger.debug(f"Pullback initial signal for {row.get('token_symbol','?')} ({mint[:8]}), awaiting confirmation")
+                        logger.debug(f"[LOG-ONLY] pullback_strict initial: {row.get('token_symbol','?')} ({mint[:8]}), awaiting confirmation")
 
             # Log strict signal frequency
             if strict_rows:
