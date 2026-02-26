@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.18
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.19
+
+v1.19 additions (2026-02-26):
+  - duration_sec + poll_count: tracked in-memory per trade, written to DB on close.
+    Report flags any SL/timeout exit with duration_sec < 60s.
+  - forced_close + exit_reason_effective: when a strategy leg closes, its paired
+    baseline (if still open) is immediately closed with exit_reason_effective=
+    'forced_pair_close'. forced_close=1 stored in DB. Baseline's own exit_reason
+    is preserved; effective reason used in report display.
+  - Price sanity check: entry_jup_implied_price stored at open (derived from
+    get_jupiter_rt_estimate mid-price). If |entry_price_usd / jup_implied - 1| > 2%,
+    price_mismatch=1 is set and trade is excluded from analysis sections.
 
 v1.18 additions (2026-02-26):
   - MFE/MAE correctness: _mfe_mae now stores entry_price, max_price_seen, min_price_seen
@@ -492,6 +503,13 @@ def init_tables():
         ("max_price_seen",     "REAL"),   # highest price_usd seen during hold
         ("min_price_seen",     "REAL"),   # lowest price_usd seen during hold
         ("mint_prefix",        "TEXT"),   # first 8 chars of mint_address for display
+        # v1.19 columns
+        ("duration_sec",       "REAL"),   # seconds from entered_at to exited_at
+        ("poll_count",         "INTEGER"),# number of check_exits polls during hold
+        ("forced_close",       "INTEGER"),# 1 if baseline was force-closed by strategy exit
+        ("exit_reason_effective", "TEXT"),# 'forced_pair_close' for forced baseline, else = exit_reason
+        ("entry_jup_implied_price", "REAL"),# Jupiter mid-price at entry for sanity check
+        ("price_mismatch",     "INTEGER"),# 1 if |entry_price/jup_implied - 1| > 0.02
     ]:
         try:
             c.execute(f"ALTER TABLE shadow_trades_v1 ADD COLUMN {col} {coltype}")
@@ -1007,14 +1025,15 @@ def get_jupiter_rt_estimate(
     liq_base: float = 0,
     liq_quote_sol: float = 0,
     cpamm_valid: bool = True,
-) -> float | None:
+    return_price: bool = False,
+) -> "float | None | tuple":
     """
     Returns total RT friction fraction (e.g. 0.008 = 0.8%) or None if no route.
-
+    If return_price=True, returns (rt_fraction, jup_implied_price_usd) or (None, None).
+    jup_implied_price_usd is derived from outAmount/inAmount * SOL_USD_price.
     Pool-type aware:
       cpamm_valid=True  → CPAMM math fallback when Jupiter unavailable
       cpamm_valid=False → return None when Jupiter unavailable (CLMM/DLMM: wrong math)
-
     Uses Jupiter Ultra API: GET /ultra/v1/order (x-api-key header).
     priceImpactPct from Ultra is one-way impact; RT = 2 * |priceImpactPct| + DEX_FEE_RT.
     """
@@ -1040,7 +1059,7 @@ def get_jupiter_rt_estimate(
                 _jupiter_api_available = False
             elif r.status_code == 404:
                 # No route for this token
-                return None
+                return (None, None) if return_price else None
             elif r.status_code == 200:
                 data = r.json()
                 impact = abs(float(data.get("priceImpactPct") or 0)) / 100.0  # convert % to fraction
@@ -1056,7 +1075,14 @@ def get_jupiter_rt_estimate(
                     f"Jup ultra RT for {mint[:8]}: impact={impact*100:.3f}% "
                     f"fee={platform_fee_rt*100:.3f}% total={rt_pct*100:.3f}% route={label}"
                 )
-                return max(rt_pct, 0.0)
+                rt_final = max(rt_pct, 0.0)
+                if return_price:
+                    # jup_implied_price = DEX price adjusted by Jupiter one-way impact.
+                    # This is the effective buy price Jupiter sees vs what DexScreener shows.
+                    # Stored so caller can flag |dex_price / jup_implied - 1| > 2% as mismatch.
+                    # impact is already a fraction (e.g. 0.003 = 0.3%)
+                    return rt_final, impact  # caller computes jup_implied = entry_price*(1-impact)
+                return rt_final
         except requests.exceptions.Timeout:
             logger.debug(f"Jupiter timeout for {mint[:8]}")
         except Exception as e:
@@ -1066,17 +1092,17 @@ def get_jupiter_rt_estimate(
     if not cpamm_valid:
         # CLMM/DLMM: CPAMM math is wrong for these pools. Block the trade.
         logger.debug(f"SKIP {mint[:8]}: Jupiter unavailable and pool is not CPAMM — no safe friction estimate")
-        return None
-
+        return (None, None) if return_price else None
     # CPAMM fallback: use CPAMM math + accurate DEX fee (0.50% RT = 0.25% each way)
     if liq_base > 0 and liq_quote_sol > 0:
         rt = cpamm_round_trip(TRADE_SIZE_SOL, liq_base, liq_quote_sol)
         cpamm_rt = rt["total_friction"] + 0.005  # 0.50% RT DEX fee (Raydium CPAMM)
         logger.debug(f"CPAMM fallback RT for {mint[:8]}: {cpamm_rt*100:.2f}%")
-        return min(cpamm_rt, 0.05)
+        val = min(cpamm_rt, 0.05)
+        return (val, None) if return_price else val  # no Jupiter impact available in fallback
     else:
         # No liquidity data and no Jupiter — conservative estimate for CPAMM
-        return 0.008
+        return (0.008, None) if return_price else 0.008
 
 # ── PRICE FETCH ───────────────────────────────────────────────────────────────
 def fetch_current_price(mint: str) -> dict | None:
@@ -1550,13 +1576,26 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
     liq_b_for_jup  = row.get("liq_base") or 0
     liq_q_for_jup  = row.get("liq_quote_sol") or 0
     cpamm_valid    = bool(row.get("cpamm_valid_flag", 1))  # default True if field missing
-    jup_rt = get_jupiter_rt_estimate(mint, liq_b_for_jup, liq_q_for_jup, cpamm_valid=cpamm_valid)
+    # v1.19: request impact alongside RT so we can compute jup_implied_price for sanity check
+    jup_result = get_jupiter_rt_estimate(mint, liq_b_for_jup, liq_q_for_jup, cpamm_valid=cpamm_valid, return_price=True)
+    if isinstance(jup_result, tuple):
+        jup_rt, jup_impact = jup_result
+    else:
+        jup_rt, jup_impact = jup_result, None  # fallback: shouldn't happen with return_price=True
     if jup_rt is None:
         logger.info(f"SKIP {strategy} {mint[:8]}: no Jupiter route")
         return None
     if jup_rt > FRICTION_GATE_MAX_RT:
         logger.info(f"SKIP {strategy} {mint[:8]}: Jupiter RT {jup_rt*100:.2f}% > gate {FRICTION_GATE_MAX_RT*100:.1f}%")
         return None
+    # v1.19: compute jup_implied_price and price_mismatch flag
+    entry_price_dex = row.get("price_usd") or 0
+    if jup_impact is not None and entry_price_dex > 0:
+        jup_implied_price = entry_price_dex * (1.0 - jup_impact)  # effective buy price after impact
+        price_mismatch_flag = 1 if abs(entry_price_dex / jup_implied_price - 1.0) > 0.02 else 0
+    else:
+        jup_implied_price = None
+        price_mismatch_flag = 0
 
     liq_b = row.get("liq_base") or 0
     liq_q = row.get("liq_quote_sol") or 0
@@ -1596,8 +1635,9 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
          lane, age_at_entry_h, liq_usd_at_entry, vol_24h_at_entry,
          pool_type_at_entry, venue_at_entry, spam_flag_at_entry,
          entry_sl_pct, entry_tp_pct, entry_rv5m,
-         run_id, git_commit, lane_at_entry, entry_score, mint_prefix)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         run_id, git_commit, lane_at_entry, entry_score, mint_prefix,
+         entry_jup_implied_price, price_mismatch)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         trade_id, strategy, mint,
         row.get("token_symbol"), row.get("pair_address"),
@@ -1615,6 +1655,7 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
         row.get("pool_type"), row.get("venue"), row.get("spam_flag"),
         round(entry_sl, 4), round(entry_tp, 4), round(rv5m_entry, 6) if rv5m_entry else None,
         _RUN_ID, _GIT_COMMIT, lane, entry_score, mint[:8],
+        round(jup_implied_price, 8) if jup_implied_price else None, price_mismatch_flag,
     ))
     conn.commit()
     conn.close()
@@ -1642,7 +1683,7 @@ def _compute_run_signature() -> str:
     """
     import json, hashlib
     sig_params = {
-        "version": "v1.18",
+        "version": "v1.19",
         "mode": MODE,
         "sl_pct": EXIT_STOP_LOSS_PCT,
         "tp_pct": EXIT_TAKE_PROFIT_PCT,
@@ -1689,10 +1730,10 @@ def _register_run():
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.18", lane_gates, key_params, sig))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.19", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.18 mode={MODE} signature={sig}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.19 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
@@ -1741,7 +1782,7 @@ def rollover_cleanup():
 rollover_cleanup()
 
 # ── CLOSE TRADE ──────────────────────────────────────────────────────────────
-def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = None):
+def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = None, forced_close: int = 0):
     entry_price = trade["entry_price_usd"]
     exit_price  = current["price_usd"]
     if entry_price <= 0 or exit_price <= 0:
@@ -1779,6 +1820,15 @@ def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = No
         except Exception:
             pass
 
+    # v1.19: duration and poll count
+    entered_at_str = trade.get("entered_at", now_iso)
+    try:
+        entered_dt = datetime.fromisoformat(entered_at_str.replace("Z", "+00:00"))
+        duration_sec_val = round((now - entered_dt).total_seconds(), 1)
+    except Exception:
+        duration_sec_val = None
+    poll_count_val = _poll_count.pop(trade["trade_id"], None)
+    exit_reason_effective_val = "forced_pair_close" if forced_close else reason
     conn = get_conn()
     # Poll-gap columns: prev/curr snapshot at first threshold cross
     if reason == "sl":
@@ -1848,6 +1898,10 @@ def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = No
             mfe_net_fee100_pct      = ?,
             max_price_seen          = ?,
             min_price_seen          = ?,
+            duration_sec            = ?,
+            poll_count              = ?,
+            forced_close            = ?,
+            exit_reason_effective   = ?,
             status                  = 'closed'
         WHERE trade_id = ?
     """, (
@@ -1866,6 +1920,7 @@ def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = No
         round(mfe_val, 6), round(mae_val, 6),
         round(mfe_net_dex_val, 6), round(mfe_net_fee100_val, 6),
         round(max_p, 8), round(min_p, 8),
+        duration_sec_val, poll_count_val, forced_close, exit_reason_effective_val,
         trade["trade_id"],
     ))
     conn.commit()
@@ -1876,8 +1931,9 @@ def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = No
     mp  = trade.get('mint_prefix') or trade.get('mint_address', '?')[:8]
     logger.info(
         f"CLOSE {trade['strategy']} {sym}({mp}) "
-        f"reason={reason} gross={gross_pnl_pct*100:+.4f}% mfe={mfe_val*100:+.4f}% mae={mae_val*100:+.4f}% "
-        f"fee100={pnl_fee100*100:+.4f}%"
+        f"reason={exit_reason_effective_val} gross={gross_pnl_pct*100:+.4f}% "
+        f"mfe={mfe_val*100:+.4f}% mae={mae_val*100:+.4f}% fee100={pnl_fee100*100:+.4f}% "
+        f"dur={duration_sec_val}s polls={poll_count_val}"
     )
 
 # # ── OVERSHOOT TRACKING ───────────────────────────────────────────────────
@@ -1885,20 +1941,54 @@ def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = No
 #                   "prev_poll_at": ISO, "prev_poll_pnl": float,
 #                   "timeout_skipped": int}
 _threshold_cross_times: dict[str, dict] = {}
-
-# ── MFE/MAE TRACKING (v1.17) ───────────────────────────────────────────────
+# ── MFE/MAE TRACKING (v1.17) ─────────────────────────────────────────────────────
 # Maps trade_id -> {"mfe": float, "mae": float}  (decimal fractions, same as gross_pnl_pct)
 # Updated on every poll in check_exits; written to DB on close_trade.
 _mfe_mae: dict[str, dict] = {}
+# ── POLL COUNT TRACKING (v1.19) ──────────────────────────────────────────────────
+# Maps trade_id -> int count of check_exits polls during hold.
+# Written to DB on close_trade alongside duration_sec.
+_poll_count: dict[str, int] = {}
+
+# ── FORCED PAIR CLOSE (v1.19) ────────────────────────────────────────────────
+def force_close_paired_baseline(strategy_trade_id: str, current_prices: dict):
+    """
+    After a strategy leg closes, immediately close its paired baseline trade
+    (if still open) with exit_reason_effective='forced_pair_close'.
+    current_prices: dict of mint_address -> price dict (from last fetch_current_price calls)
+    """
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM shadow_trades_v1
+        WHERE baseline_trigger_id = ? AND status = 'open'
+    """, (strategy_trade_id,)).fetchall()
+    cols = [d[0] for d in conn.description]
+    conn.close()
+    for row in rows:
+        baseline_trade = dict(zip(cols, row))
+        mint = baseline_trade["mint_address"]
+        current = current_prices.get(mint) or fetch_current_price(mint)
+        if current is None:
+            logger.warning(f"force_close_paired_baseline: no price for {mint[:8]}, skipping")
+            continue
+        cross = _threshold_cross_times.pop(baseline_trade["trade_id"], None)
+        _adaptive_thresholds.pop(baseline_trade["trade_id"], None)
+        logger.info(
+            f"FORCED_PAIR_CLOSE baseline {baseline_trade.get('token_symbol','?')} "
+            f"(triggered by strategy {strategy_trade_id[:8]} closing)"
+        )
+        close_trade(baseline_trade, current, "forced_pair_close", cross, forced_close=1)
 
 # ── CHECK EXITS ───────────────────────────────────────────────────────────────
 def check_exits(open_trades: list[dict]):
     now_utc = datetime.now(timezone.utc)
+    _current_prices_cache: dict[str, dict] = {}  # v1.19: cache for force_close_paired_baseline
     for trade in open_trades:
         mint = trade["mint_address"]
         current = fetch_current_price(mint)
         if not current:
             continue
+        _current_prices_cache[mint] = current  # v1.19: cache price for forced baseline close
         entry_price = trade["entry_price_usd"]
         if entry_price <= 0:
             continue
@@ -1937,6 +2027,8 @@ def check_exits(open_trades: list[dict]):
         cross["curr_poll_at"]  = now_utc.isoformat()
         cross["curr_poll_pnl"] = gross_pnl_pct
 
+        # v1.19: Increment poll count for this trade
+        _poll_count[trade_id] = _poll_count.get(trade_id, 0) + 1
         # v1.18: Update MFE/MAE from price path (absolute USD prices)
         cur_price = current["price_usd"]
         if trade_id not in _mfe_mae:
@@ -1962,13 +2054,15 @@ def check_exits(open_trades: list[dict]):
             cross["tp_prev_poll_at"]  = prev_at
             cross["tp_prev_poll_pnl"] = prev_pnl
 
+        is_baseline = trade.get("baseline_trigger_id") is not None  # v1.19
         if hold_min >= HARD_MAX_HOLD_MINUTES:
             # Hard max hold — always exit regardless of timeout filter
             close_trade(trade, current, "timeout", cross)
             _threshold_cross_times.pop(trade_id, None)
             _adaptive_thresholds.pop(trade_id, None)
+            if not is_baseline:
+                force_close_paired_baseline(trade_id, _current_prices_cache)
             continue
-
         if hold_min >= EXIT_MAX_HOLD_MINUTES:
             # Soft timeout: apply fee filter before exiting
             rt_floor = trade.get("entry_round_trip_pct") or 0.006
@@ -1985,16 +2079,22 @@ def check_exits(open_trades: list[dict]):
             close_trade(trade, current, "timeout", cross)
             _threshold_cross_times.pop(trade_id, None)
             _adaptive_thresholds.pop(trade_id, None)
+            if not is_baseline:
+                force_close_paired_baseline(trade_id, _current_prices_cache)
             continue
         if gross_pnl_pct >= tp_threshold:
             close_trade(trade, current, "tp", cross)
             _threshold_cross_times.pop(trade_id, None)
             _adaptive_thresholds.pop(trade_id, None)
+            if not is_baseline:
+                force_close_paired_baseline(trade_id, _current_prices_cache)
             continue
         if gross_pnl_pct <= sl_threshold:
             close_trade(trade, current, "sl", cross)
             _threshold_cross_times.pop(trade_id, None)
             _adaptive_thresholds.pop(trade_id, None)
+            if not is_baseline:
+                force_close_paired_baseline(trade_id, _current_prices_cache)
             continue
         if EXIT_LIQ_CLIFF:
             entry_k = trade.get("entry_k_invariant")
@@ -2054,8 +2154,9 @@ def check_exits(open_trades: list[dict]):
                     close_trade(trade, current, "lp_removal", cross)
                     _threshold_cross_times.pop(trade_id, None)
                     _adaptive_thresholds.pop(trade_id, None)
+                    if not is_baseline:
+                        force_close_paired_baseline(trade_id, _current_prices_cache)
                     continue
-
         time.sleep(0.05)
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────────────

@@ -273,8 +273,13 @@ pairs_q = (
     f"  s.entry_price_usd AS s_entry_price, "
     f"  s.mint_address AS s_mint, s.mint_prefix AS s_mint_prefix, "
     f"  s.entry_round_trip_pct AS s_rt, "
+    f"  s.duration_sec AS s_dur, s.poll_count AS s_polls, "
+    f"  s.exit_reason_effective AS s_exit_eff, s.price_mismatch AS s_price_mm, "
+    f"  s.entry_jup_implied_price AS s_jup_price, "
     f"  b.trade_id AS b_id, b.token_symbol AS b_token, b.lane AS b_lane, "
-    f"  b.exit_reason AS b_exit, b.run_id AS b_run, "
+    f"  b.exit_reason AS b_exit, b.exit_reason_effective AS b_exit_eff, "
+    f"  b.forced_close AS b_forced, b.duration_sec AS b_dur, b.poll_count AS b_polls, "
+    f"  b.run_id AS b_run, "
     f"  b.gross_pnl_pct AS b_gross, b.shadow_pnl_pct_fee100 AS b_fee100, "
     f"  b.mfe_gross_pct AS b_mfe, b.mae_gross_pct AS b_mae "
     f"FROM shadow_trades_v1 s "
@@ -354,9 +359,11 @@ if mode in ("mini", "decision"):
     print(f"PAIR HEALTH MINI-REPORT ({SCOPE_LABEL}, join-based)")
     print("=" * 70)
     print(f"{'#':<3} {'s_run':<6} {'s_token(mint)':<18} {'b_token':<10} "
-          f"{'entry':<20} {'s_exit':<9} {'b_exit':<9} "
-          f"{'s_gross%':>9} {'b_gross%':>9} {'s_f100%':>8} {'b_f100%':>8} {'delta%':>8}")
-    print("-" * 118)
+          f"{'entry':<20} {'s_exit':<14} {'b_exit':<18} "
+          f"{'s_dur':>6} {'s_pol':>5} {'s_gross%':>9} {'b_gross%':>9} {'s_f100%':>8} {'b_f100%':>8} {'delta%':>8} {'flag':<6}")
+    print("-" * 140)
+    fast_exit_flags = []
+    price_mm_flags = []
     for i, p in enumerate(pairs, 1):
         sg = (p["s_gross"] or 0.0) * 100
         bg = (p["b_gross"] or 0.0) * 100
@@ -366,12 +373,27 @@ if mode in ("mini", "decision"):
         run_short = p["s_run"][:6] if p["s_run"] else "?"
         mp = p["s_mint_prefix"] or (p["s_mint"] or "")[:8] if p["s_mint_prefix"] or p["s_mint"] else "?"
         s_tok_display = f"{p['s_token']}({mp})"
+        s_exit_eff = p["s_exit_eff"] or p["s_exit"] or "?"
+        b_exit_eff = p["b_exit_eff"] or p["b_exit"] or "?"
+        s_dur = p["s_dur"] if p["s_dur"] is not None else "-"
+        s_pol = p["s_polls"] if p["s_polls"] is not None else "-"
+        flag = ""
+        if p["s_price_mm"]:
+            flag += "MM "
+            price_mm_flags.append(i)
+        if isinstance(s_dur, (int, float)) and s_dur < 60:
+            flag += "FAST"
+            fast_exit_flags.append(i)
         print(f"{i:<3} {run_short:<6} {s_tok_display:<18} {p['b_token']:<10} "
               f"{(p['s_entered'] or '')[:19]:<20} "
-              f"{p['s_exit']:<9} {p['b_exit']:<9} "
-              f"{sg:>9.3f} {bg:>9.3f} {sf:>8.3f} {bf:>8.3f} {delta:>8.3f}")
-
-    print("-" * 118)
+              f"{s_exit_eff:<14} {b_exit_eff:<18} "
+              f"{str(s_dur):>6} {str(s_pol):>5} "
+              f"{sg:>9.3f} {bg:>9.3f} {sf:>8.3f} {bf:>8.3f} {delta:>8.3f} {flag:<6}")
+    print("-" * 140)
+    if fast_exit_flags:
+        print(f"  FAST flag: pairs {fast_exit_flags} had strategy duration_sec < 60s — may indicate SL at first poll")
+    if price_mm_flags:
+        print(f"  MM flag  : pairs {price_mm_flags} had price_mismatch=1 at entry — excluded from MFE/MAE analysis")
     print(f"\n  INTEGRITY: missing_baseline={n_missing_baseline} "
           f"invalid_pair={n_invalid} rollover_excluded={n_rollover}")
     print(f"  PnL SCALE: stored as decimal, displayed as % (x100). Verified in P0.2.")
@@ -404,6 +426,7 @@ if mode in ("mini", "decision"):
     # All rows that have any MFE data
     pairs_with_mfe_all = [p for p in pairs if p["s_mfe"] is not None]
     # Exclude pre-fix rows: max_price_seen < entry_price_usd means MFE init bug
+    # Also exclude price_mismatch=1 rows (DEX price vs Jupiter diverged at entry)
     pairs_with_mfe = [
         p for p in pairs_with_mfe_all
         if not (
@@ -412,18 +435,32 @@ if mode in ("mini", "decision"):
             and p["s_entry_price"] > 0
             and p["s_max_price"] < p["s_entry_price"]
         )
+        and not p["s_price_mm"]
     ]
     n_mfe_total = len(pairs_with_mfe_all)
+    n_mfe_excl_prefix = sum(
+        1 for p in pairs_with_mfe_all
+        if p["s_max_price"] is not None
+        and p["s_entry_price"] is not None
+        and p["s_entry_price"] > 0
+        and p["s_max_price"] < p["s_entry_price"]
+    )
+    n_mfe_excl_mm = sum(1 for p in pairs_with_mfe_all if p["s_price_mm"])
     n_mfe_excl  = n_mfe_total - len(pairs_with_mfe)
     n_mfe       = len(pairs_with_mfe)
     if n_mfe_total == 0:
         print("  No MFE/MAE data yet (requires v1.17+ trades; columns are NULL for older rows).")
         print("  Once v1.18 is deployed and trades close, this section will populate.")
     else:
-        excl_note = f"  ({n_mfe_excl} pre-fix row(s) excluded: max_price_seen < entry_price_usd)" if n_mfe_excl else ""
+        excl_parts = []
+        if n_mfe_excl_prefix:
+            excl_parts.append(f"{n_mfe_excl_prefix} pre-fix (max_price < entry)")
+        if n_mfe_excl_mm:
+            excl_parts.append(f"{n_mfe_excl_mm} price_mismatch")
+        excl_note = f"  (excluded: {', '.join(excl_parts)})" if excl_parts else ""
         print(f"  mfe_valid_n / total_n : {n_mfe} / {n_mfe_total}{excl_note}")
         if n_mfe == 0:
-            print("  All MFE rows are pre-fix. No valid data to aggregate yet.")
+            print("  All MFE rows are excluded. No valid data to aggregate yet.")
     if n_mfe > 0:
         # Proof table: 5 sample trades showing price path
         proof_rows = [p for p in pairs_with_mfe if p["s_max_price"] is not None][:5]
@@ -627,16 +664,23 @@ if mode == "decision":
     print("-" * 70)
     exit_map_s = {}
     exit_map_b = {}
+    n_forced = 0
     for p in pairs:
-        er_s = p["s_exit"] or "NULL"
-        er_b = p["b_exit"] or "NULL"
+        er_s = p["s_exit_eff"] or p["s_exit"] or "NULL"
+        er_b = p["b_exit_eff"] or p["b_exit"] or "NULL"
         exit_map_s[er_s] = exit_map_s.get(er_s, 0) + 1
         exit_map_b[er_b] = exit_map_b.get(er_b, 0) + 1
-    print(f"  {'leg':<10} {'exit_reason':<15} {'n':>4}")
+        if p["b_forced"]:
+            n_forced += 1
+    print(f"  {'leg':<10} {'exit_reason_effective':<22} {'n':>4}")
     for er, cnt in sorted(exit_map_s.items(), key=lambda x: -x[1]):
-        print(f"  {'strategy':<10} {er:<15} {cnt:>4}")
+        print(f"  {'strategy':<10} {er:<22} {cnt:>4}")
     for er, cnt in sorted(exit_map_b.items(), key=lambda x: -x[1]):
-        print(f"  {'baseline':<10} {er:<15} {cnt:>4}")
+        print(f"  {'baseline':<10} {er:<22} {cnt:>4}")
+    if n_forced:
+        print(f"\n  NOTE: {n_forced} baseline leg(s) labeled forced_pair_close (strategy exited early, baseline closed at same price)")
+    else:
+        print(f"  NOTE: forced_pair_close=0 (all baseline legs ran to their own exit condition)")
 
     # Concentration check
     print("\n4) CONCENTRATION CHECK (top-5 token contribution)")
