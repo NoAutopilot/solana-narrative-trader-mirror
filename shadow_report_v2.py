@@ -544,6 +544,68 @@ if mode in ("mini", "decision"):
         if n_mfe > 0:
             _print_mfe_aggregate("NO MISMATCH (price_mismatch=0)", pairs_with_mfe)
 
+    # ── MFE MONETIZABILITY BY COHORT ─────────────────────────────────────────
+    # Answers: was profit ever available (signal/horizon problem) or just not captured (exit problem)?
+    if n_mfe > 0:
+        print(f"\n5b) MFE MONETIZABILITY BY COHORT")
+        print("-" * 70)
+        print(f"  Key: mfe_net_fee100 = MFE_gross - (RT_pct + 1.0%)  [net of full fee floor]")
+        print(f"  >0   = profit was available at some point during the trade")
+        print(f"  >0.25% = meaningful profit window existed")
+        print()
+
+        def _mfe_monetizability(label: str, pset: list):
+            """Print monetizability stats for a cohort subset (must have s_mfe != None)."""
+            valid = [p for p in pset if p["s_mfe"] is not None and not _is_prefix_bug(p) and not p["s_price_mm"]]
+            n_v = len(valid)
+            if n_v == 0:
+                print(f"  {label}: no valid MFE data")
+                return
+            mfe_nf_vals = []
+            mae_g_vals  = []
+            for p in valid:
+                rt_dec    = p["s_rt"] if p["s_rt"] is not None else 0.005
+                fee_floor = rt_dec * 100 + 1.00
+                mfe_gross = (p["s_mfe"] or 0.0) * 100
+                mae_gross = (p["s_mae"] or 0.0) * 100
+                mfe_nf    = (p["s_mfe_net_fee100"] * 100
+                             if p["s_mfe_net_fee100"] is not None
+                             else mfe_gross - fee_floor)
+                mfe_nf_vals.append(mfe_nf)
+                mae_g_vals.append(mae_gross)
+            pct_gt0    = 100 * sum(1 for v in mfe_nf_vals if v > 0)    / n_v
+            pct_gt025  = 100 * sum(1 for v in mfe_nf_vals if v > 0.25) / n_v
+            avg_mfe_nf = sum(mfe_nf_vals) / n_v
+            avg_mae_g  = sum(mae_g_vals)  / n_v
+            print(f"  {label} (n={n_v}):")
+            print(f"    % mfe_net_fee100 > 0      : {pct_gt0:.1f}%  ({sum(1 for v in mfe_nf_vals if v > 0)}/{n_v})")
+            print(f"    % mfe_net_fee100 > +0.25% : {pct_gt025:.1f}%  ({sum(1 for v in mfe_nf_vals if v > 0.25)}/{n_v})")
+            print(f"    avg mfe_net_fee100        : {avg_mfe_nf:+.4f}%")
+            print(f"    avg mae_gross             : {avg_mae_g:+.4f}%")
+            if pct_gt0 >= 60 and avg_mfe_nf > 0:
+                diag = "EXIT PROBLEM — profit available but not captured (improve exit timing)"
+            elif pct_gt0 < 40:
+                diag = "SIGNAL/HORIZON PROBLEM — profit rarely available (improve entry or hold time)"
+            else:
+                diag = "MIXED — some profit available; both signal quality and exit timing matter"
+            print(f"    Diagnosis: {diag}")
+
+        # Build cohorts matching sensitivity summaries A/B/C
+        _mfe_monetizability("A) FULL", pairs_with_mfe)
+        nofast_mfe = [p for p in pairs_with_mfe
+                      if not (isinstance(p["s_dur"], (int, float)) and p["s_dur"] < 60)]
+        _mfe_monetizability("B) NO-FAST", nofast_mfe)
+        # C) HIGH-SCORE + NO-FAST (top tercile)
+        pws_e = [p for p in pairs_with_mfe if p["s_score"] is not None]
+        if len(pws_e) >= 6:
+            scores_e2 = sorted(p["s_score"] for p in pws_e)
+            t2_e2 = scores_e2[2 * len(scores_e2) // 3]
+            high_nofast_mfe = [p for p in nofast_mfe
+                               if p["s_score"] is not None and p["s_score"] > t2_e2]
+            _mfe_monetizability(f"C) HIGH-SCORE+NO-FAST (score>{t2_e2:.2f})", high_nofast_mfe)
+        else:
+            print("  C) HIGH-SCORE+NO-FAST: insufficient score data")
+
     # ── SECTION 6: SCORE MONOTONICITY ───────────────────────────────────────────────
     print("\n6) SCORE MONOTONICITY (entry_score terciles)")
     print("-" * 70)
@@ -854,6 +916,107 @@ if mode == "decision":
             nt = lane_total[lane]
             print(f"    {lane:<20} {nf:>7} {nt:>8} {nf/nt*100:>9.1f}%")
 
+    # ── FAST PRE-ENTRY FEATURE ATTRIBUTION (prospective gate analysis) ────────
+    if n_fast > 0 and n_nofast > 0:
+        print(f"\n" + "-" * 70)
+        print("FAST PRE-ENTRY FEATURE ATTRIBUTION (FAST vs NO-FAST)")
+        print("-" * 70)
+        print("  Goal: find a prospective gate that predicts FAST risk at entry time.")
+        print()
+        # Fetch entry features for ALL closed strategy legs in scope
+        all_run_ids = list(set(p["s_run"] for p in pairs))
+        in_r2 = "(" + ",".join("?"*len(all_run_ids)) + ")"
+        feat_rows = conn.execute(
+            f"SELECT trade_id, token_symbol, mint_address, lane, entry_score, "
+            f"duration_sec, entry_rv5m, entry_r_m5, entry_buy_count_ratio, "
+            f"entry_vol_accel, entry_jup_rt_pct "
+            f"FROM shadow_trades_v1 "
+            f"WHERE run_id IN {in_r2} "
+            f"AND strategy NOT LIKE 'baseline%' AND status='closed' "
+            f"AND exit_reason != 'rollover_close'",
+            all_run_ids
+        ).fetchall()
+        fast_feat  = [r for r in feat_rows if r["duration_sec"] is not None and r["duration_sec"] < 60]
+        nofast_feat = [r for r in feat_rows if r["duration_sec"] is None or r["duration_sec"] >= 60]
+
+        def _feat_stats(rows, col):
+            vals = [r[col] for r in rows if r[col] is not None]
+            if not vals: return float("nan"), float("nan"), len(vals)
+            vals.sort()
+            med = vals[len(vals)//2]
+            return sum(vals)/len(vals), med, len(vals)
+
+        features = [
+            ("entry_rv5m",            "rv5m (5m realized vol)",     True,  100.0),  # scale to %
+            ("entry_r_m5",            "r_m5 (5m return)",           False, 100.0),
+            ("entry_buy_count_ratio", "buy_ratio (buys/total)",     False, 1.0),
+            ("entry_vol_accel",       "vol_accel",                  False, 1.0),
+            ("entry_jup_rt_pct",      "jup_rt_pct (round-trip)",   True,  100.0),
+            ("entry_score",           "score",                      False, 1.0),
+        ]
+        print(f"  {'Feature':<28} {'FAST mean':>11} {'FAST med':>9} {'NOFAST mean':>12} {'NOFAST med':>11} {'n_F':>5} {'n_NF':>6}")
+        print(f"  {'-'*82}")
+        gate_candidates = []  # (feature, direction, threshold, separation_score)
+        for col, label, higher_is_riskier, scale in features:
+            fm, fmed, fn = _feat_stats(fast_feat, col)
+            nm, nmed, nn = _feat_stats(nofast_feat, col)
+            fm_s  = fm  * scale if fm  == fm  else float("nan")
+            fmed_s= fmed* scale if fmed== fmed else float("nan")
+            nm_s  = nm  * scale if nm  == nm  else float("nan")
+            nmed_s= nmed* scale if nmed== nmed else float("nan")
+            fm_str   = f"{fm_s:+.3f}"   if fm_s  == fm_s  else "N/A"
+            fmed_str = f"{fmed_s:+.3f}" if fmed_s == fmed_s else "N/A"
+            nm_str   = f"{nm_s:+.3f}"   if nm_s  == nm_s  else "N/A"
+            nmed_str = f"{nmed_s:+.3f}" if nmed_s == nmed_s else "N/A"
+            print(f"  {label:<28} {fm_str:>11} {fmed_str:>9} {nm_str:>12} {nmed_str:>11} {fn:>5} {nn:>6}")
+            # Collect gate candidate if separation is meaningful
+            if fm == fm and nm == nm and abs(fm - nm) > 0:
+                sep = abs(fm - nm) / (abs(nm) + 1e-9)
+                gate_candidates.append((col, label, higher_is_riskier, fm, nm, scale, sep))
+        print()
+        # Threshold scan: for each feature, find the threshold that best separates FAST from NO-FAST
+        # using a simple accuracy metric (% correctly classified)
+        print(f"  PROSPECTIVE GATE SCAN (best single-feature threshold):")
+        print(f"  {'Feature':<28} {'direction':<10} {'threshold':>12} {'accuracy':>10} {'n_FAST_blocked':>15} {'n_NOFAST_blocked':>17}")
+        print(f"  {'-'*95}")
+        best_gates = []
+        for col, label, higher_is_riskier, fm, nm, scale, sep in sorted(gate_candidates, key=lambda x: -x[6])[:6]:
+            all_vals = [(r[col], r["duration_sec"]) for r in feat_rows
+                        if r[col] is not None and r["duration_sec"] is not None]
+            if not all_vals: continue
+            col_vals = sorted(set(v for v, _ in all_vals))
+            # Sample up to 20 candidate thresholds evenly
+            step = max(1, len(col_vals) // 20)
+            candidates = col_vals[::step]
+            best_acc, best_thr, best_nfb, best_nnfb = 0, None, 0, 0
+            for thr in candidates:
+                if higher_is_riskier:
+                    # gate: block if feature >= thr
+                    n_fast_blocked  = sum(1 for v, d in all_vals if v >= thr and d < 60)
+                    n_nofast_blocked= sum(1 for v, d in all_vals if v >= thr and d >= 60)
+                    n_fast_pass     = sum(1 for v, d in all_vals if v <  thr and d < 60)
+                    n_nofast_pass   = sum(1 for v, d in all_vals if v <  thr and d >= 60)
+                else:
+                    # gate: block if feature <= thr
+                    n_fast_blocked  = sum(1 for v, d in all_vals if v <= thr and d < 60)
+                    n_nofast_blocked= sum(1 for v, d in all_vals if v <= thr and d >= 60)
+                    n_fast_pass     = sum(1 for v, d in all_vals if v >  thr and d < 60)
+                    n_nofast_pass   = sum(1 for v, d in all_vals if v >  thr and d >= 60)
+                total = len(all_vals)
+                acc = (n_fast_blocked + n_nofast_pass) / total if total > 0 else 0
+                if acc > best_acc:
+                    best_acc, best_thr, best_nfb, best_nnfb = acc, thr, n_fast_blocked, n_nofast_blocked
+            if best_thr is not None:
+                direction = ">= thr" if higher_is_riskier else "<= thr"
+                thr_disp = f"{best_thr*scale:.4f}"
+                print(f"  {label:<28} {direction:<10} {thr_disp:>12} {best_acc*100:>9.1f}% {best_nfb:>15} {best_nnfb:>17}")
+                best_gates.append((label, direction, best_thr, best_acc, best_nfb, best_nnfb))
+        if best_gates:
+            top = best_gates[0]
+            print(f"\n  Best single gate: '{top[0]}' {top[1]} {top[2]:.4f}")
+            print(f"  Would block {top[4]}/{n_fast} FAST trades ({100*top[4]/n_fast:.0f}%) at cost of {top[5]}/{n_nofast} NO-FAST trades ({100*top[5]/n_nofast:.0f}%)")
+            print(f"  Use this to set FAST_RISK_GATE threshold at n=50 decision point.")
+
     # ── FAST PAIRS DETAIL TABLE ───────────────────────────────────────────────
     if n_fast > 0:
         print(f"\n" + "-" * 70)
@@ -948,10 +1111,13 @@ if mode == "decision":
         print("  NOTE: entry_jup_implied_price = jup_exec_price_native (SOL/token) post v1.19 fix.")
 
 # ── n=50 VERDICT GRID ────────────────────────────────────────────────────────
-if n_pairs >= 50:
+if n_pairs >= 20:  # show grid from n=20 onwards so it is always visible
     print("\n" + "=" * 70)
-    print("n=50 VERDICT GRID")
+    print(f"DECISION GRID (n={n_pairs}{'  -- n>=50 DECISION POINT' if n_pairs >= 50 else '  ... waiting for n=50'})")
     print("=" * 70)
+    print("  mean_strat = mean(strategy_fee100%)  [net of RT+1% floor; >0 = actually profitable]")
+    print("  mean_delta = mean(strategy - baseline)  CI = 95% bootstrap")
+    print()
 
     def _cohort_stats(cohort_pairs):
         """Return (mean_strat, mean_base, mean_delta, ci_lo, ci_hi, n) for a list of pairs."""
@@ -968,33 +1134,70 @@ if n_pairs >= 50:
         ci_lo, ci_hi = bootstrap_ci(deltas) if n >= 3 else (float("nan"), float("nan"))
         return mean_s, mean_b, mean_d, ci_lo, ci_hi, n
 
-    def yn(cond): return "YES ✓" if cond else "NO  ✗"
+    def yn(cond): return "YES" if cond else "NO "
 
     # A) Full sample
     cohort_a = pairs
     # B) No-FAST (strategy duration_sec >= 60s)
-    cohort_b = [p for p in pairs if not (isinstance(p.get("s_dur"), (int, float)) and p["s_dur"] < 60)]
+    cohort_b = [p for p in pairs if not (isinstance(p["s_dur"], (int, float)) and p["s_dur"] < 60)]
     # C) No-FAST + native_price_ok=1 only
-    #    native_ok is stored on strategy leg as jup_price_unit_native_ok
-    #    We use s_native_ok key if present; fall back to checking the DB directly
-    cohort_c = [p for p in cohort_b if p.get("s_native_ok") == 1]
+    cohort_c = [p for p in cohort_b if p["s_native_ok"] == 1]
+    # D) HIGH-SCORE + NO-FAST (top tercile by entry_score)
+    pws_grid = [p for p in pairs if p["s_score"] is not None]
+    if len(pws_grid) >= 6:
+        scores_grid = sorted(p["s_score"] for p in pws_grid)
+        t2_grid = scores_grid[2 * len(scores_grid) // 3]
+        cohort_d = [p for p in cohort_b if p["s_score"] is not None and p["s_score"] > t2_grid]
+        cohort_d_label = f"D) HIGH-SCORE+NO-FAST (>{t2_grid:.2f})"
+    else:
+        cohort_d = []
+        cohort_d_label = "D) HIGH-SCORE+NO-FAST (no score data)"
+        t2_grid = float("nan")
 
     ms_a, mb_a, md_a, ci_lo_a, ci_hi_a, n_a = _cohort_stats(cohort_a)
     ms_b, mb_b, md_b, ci_lo_b, ci_hi_b, n_b = _cohort_stats(cohort_b)
     ms_c, mb_c, md_c, ci_lo_c, ci_hi_c, n_c = _cohort_stats(cohort_c)
+    ms_d, mb_d, md_d, ci_lo_d, ci_hi_d, n_d = _cohort_stats(cohort_d)
 
-    hdr = f"  {'Cohort':<35} {'n':>4}  {'mean_strat':>11} {'mean_base':>11} {'mean_delta':>11}  {'CI':>22}  {'CI>0?'}"
+    hdr = (f"  {'Cohort':<42} {'n':>4}  {'mean_strat%':>12} {'mean_delta%':>12}  "
+           f"{'95% CI':>24}  {'CI>0?':>5}  {'strat>0?':>8}")
     print(hdr)
-    print("-" * 110)
+    print("-" * 120)
     def _row(label, n, ms, mb, md, ci_lo, ci_hi):
-        ci_str = f"[{ci_lo:+.2f}%, {ci_hi:+.2f}%]" if ci_lo == ci_lo else "[N/A]"
-        pos    = yn(ci_lo > 0) if ci_lo == ci_lo else "N/A"
-        return (f"  {label:<35} {n:>4}  {ms:>+10.4f}% {mb:>+10.4f}% {md:>+10.4f}%  {ci_str:>22}  {pos}")
+        if ci_lo != ci_lo:  # nan
+            ci_str, ci_pos = "[N/A]", "N/A"
+        else:
+            ci_str = f"[{ci_lo:+.2f}%, {ci_hi:+.2f}%]"
+            ci_pos = yn(ci_lo > 0)
+        strat_pos = yn(ms > 0) if ms == ms else "N/A"
+        ms_str = f"{ms:>+10.4f}%" if ms == ms else "      N/A"
+        md_str = f"{md:>+10.4f}%" if md == md else "      N/A"
+        return (f"  {label:<42} {n:>4}  {ms_str:>12} {md_str:>12}  {ci_str:>24}  {ci_pos:>5}  {strat_pos:>8}")
     print(_row("A) Full sample",                  n_a, ms_a, mb_a, md_a, ci_lo_a, ci_hi_a))
     print(_row("B) No-FAST (dur>=60s)",           n_b, ms_b, mb_b, md_b, ci_lo_b, ci_hi_b))
     print(_row("C) No-FAST + native_price_ok=1",  n_c, ms_c, mb_c, md_c, ci_lo_c, ci_hi_c))
-    print("=" * 70)
+    print(_row(cohort_d_label,                    n_d, ms_d, mb_d, md_d, ci_lo_d, ci_hi_d))
+    print("=" * 120)
+    # Decision guidance
+    if n_pairs >= 50:
+        print()
+        print("  n=50 DECISION RULES:")
+        print(f"  [1] Enable MIN_SCORE_TO_TRADE if: cohort D CI>0 AND cohort D strat>0")
+        d_ci_ok  = (ci_lo_d == ci_lo_d and ci_lo_d > 0)
+        d_str_ok = (ms_d == ms_d and ms_d > 0)
+        print(f"      -> CI>0: {yn(d_ci_ok)}   strat>0: {yn(d_str_ok)}")
+        print(f"  [2] Enable FAST_RISK_GATE if: FAST pre-entry feature scan shows accuracy >= 70%")
+        print(f"  [3] Deploy EXACTLY ONE flag change under a new signature for clean A/B test.")
+        if n_d >= 5 and d_ci_ok and d_str_ok:
+            print(f"  *** RECOMMENDATION: Enable MIN_SCORE_TO_TRADE = {t2_grid:.2f} (top-tercile threshold) ***")
+        elif n_d >= 5 and d_ci_ok and not d_str_ok:
+            print(f"  *** RECOMMENDATION: Delta positive but strat still negative -- consider FAST_RISK_GATE first ***")
+        else:
+            print(f"  *** RECOMMENDATION: Inconclusive -- extend run or review FAST gate ***")
+    else:
+        pairs_needed = 50 - n_pairs
+        print(f"  NOTE: {pairs_needed} more pairs needed to reach n=50 decision point.")
     if n_c < 10:
-        print(f"  NOTE: cohort C has only n={n_c} pairs — CI will be wide until more native_ok=1 trades accumulate.")
+        print(f"  NOTE: cohort C has only n={n_c} pairs -- CI will be wide until more native_ok=1 trades accumulate.")
 print("\n" + "=" * 70)
 conn.close()
