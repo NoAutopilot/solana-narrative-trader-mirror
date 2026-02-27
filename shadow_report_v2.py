@@ -276,6 +276,7 @@ pairs_q = (
     f"  s.duration_sec AS s_dur, s.poll_count AS s_polls, "
     f"  s.exit_reason_effective AS s_exit_eff, s.price_mismatch AS s_price_mm, "
     f"  s.entry_jup_implied_price AS s_jup_price, "
+    f"  COALESCE(s.jup_price_unit_native_ok, 0) AS s_native_ok, "
     f"  b.trade_id AS b_id, b.token_symbol AS b_token, b.lane AS b_lane, "
     f"  b.exit_reason AS b_exit, b.exit_reason_effective AS b_exit_eff, "
     f"  b.forced_close AS b_forced, b.duration_sec AS b_dur, b.poll_count AS b_polls, "
@@ -917,32 +918,49 @@ if n_pairs >= 50:
     print("\n" + "=" * 70)
     print("n=50 VERDICT GRID")
     print("=" * 70)
-    # Recompute needed values
-    full_deltas   = [(p["s_fee100"] or 0.0)*100 - (p["b_fee100"] or 0.0)*100 for p in pairs]
-    nf_pairs_v    = [p for p in pairs if not (isinstance(p["s_dur"], (int, float)) and p["s_dur"] < 60)]
-    nf_deltas_v   = [(p["s_fee100"] or 0.0)*100 - (p["b_fee100"] or 0.0)*100 for p in nf_pairs_v]
-    full_ci_lo, full_ci_hi = bootstrap_ci(full_deltas)
-    nf_ci_lo,   nf_ci_hi   = bootstrap_ci(nf_deltas_v) if len(nf_deltas_v) >= 3 else (float("nan"), float("nan"))
-    # High-score bucket strategy_fee100
-    pairs_with_score_v = [p for p in pairs if p["s_score"] is not None]
-    high_strat_pos = False
-    if len(pairs_with_score_v) >= 6:
-        sv = sorted(p["s_score"] for p in pairs_with_score_v)
-        t2v = sv[2 * len(sv) // 3]
-        high_bucket = [p for p in pairs_with_score_v if p["s_score"] > t2v]
-        if high_bucket:
-            high_strat_mean = sum((p["s_fee100"] or 0.0)*100 for p in high_bucket) / len(high_bucket)
-            high_strat_pos = high_strat_mean > 0
-        else:
-            high_strat_mean = float("nan")
-    else:
-        high_strat_mean = float("nan")
+
+    def _cohort_stats(cohort_pairs):
+        """Return (mean_strat, mean_base, mean_delta, ci_lo, ci_hi, n) for a list of pairs."""
+        n = len(cohort_pairs)
+        if n == 0:
+            nan = float("nan")
+            return nan, nan, nan, nan, nan, 0
+        deltas   = [(p["s_fee100"] or 0.0)*100 - (p["b_fee100"] or 0.0)*100 for p in cohort_pairs]
+        s_means  = [(p["s_fee100"] or 0.0)*100 for p in cohort_pairs]
+        b_means  = [(p["b_fee100"] or 0.0)*100 for p in cohort_pairs]
+        mean_s   = sum(s_means) / n
+        mean_b   = sum(b_means) / n
+        mean_d   = sum(deltas)  / n
+        ci_lo, ci_hi = bootstrap_ci(deltas) if n >= 3 else (float("nan"), float("nan"))
+        return mean_s, mean_b, mean_d, ci_lo, ci_hi, n
+
     def yn(cond): return "YES ✓" if cond else "NO  ✗"
-    print(f"  {'Criterion':<45} {'Result':<10} {'Detail'}")
-    print("-" * 70)
-    print(f"  {'Δ_fee100 CI > 0 (full sample)':<45} {yn(full_ci_lo > 0):<10} CI=[{full_ci_lo:+.2f}%, {full_ci_hi:+.2f}%]")
-    print(f"  {'Δ_fee100 CI > 0 (no-FAST)':<45} {yn(nf_ci_lo > 0):<10} CI=[{nf_ci_lo:+.2f}%, {nf_ci_hi:+.2f}%]")
-    print(f"  {'strategy_fee100 > 0 (high-score bucket)':<45} {yn(high_strat_pos):<10} avg={high_strat_mean:+.4f}%")
+
+    # A) Full sample
+    cohort_a = pairs
+    # B) No-FAST (strategy duration_sec >= 60s)
+    cohort_b = [p for p in pairs if not (isinstance(p.get("s_dur"), (int, float)) and p["s_dur"] < 60)]
+    # C) No-FAST + native_price_ok=1 only
+    #    native_ok is stored on strategy leg as jup_price_unit_native_ok
+    #    We use s_native_ok key if present; fall back to checking the DB directly
+    cohort_c = [p for p in cohort_b if p.get("s_native_ok") == 1]
+
+    ms_a, mb_a, md_a, ci_lo_a, ci_hi_a, n_a = _cohort_stats(cohort_a)
+    ms_b, mb_b, md_b, ci_lo_b, ci_hi_b, n_b = _cohort_stats(cohort_b)
+    ms_c, mb_c, md_c, ci_lo_c, ci_hi_c, n_c = _cohort_stats(cohort_c)
+
+    hdr = f"  {'Cohort':<35} {'n':>4}  {'mean_strat':>11} {'mean_base':>11} {'mean_delta':>11}  {'CI':>22}  {'CI>0?'}"
+    print(hdr)
+    print("-" * 110)
+    def _row(label, n, ms, mb, md, ci_lo, ci_hi):
+        ci_str = f"[{ci_lo:+.2f}%, {ci_hi:+.2f}%]" if ci_lo == ci_lo else "[N/A]"
+        pos    = yn(ci_lo > 0) if ci_lo == ci_lo else "N/A"
+        return (f"  {label:<35} {n:>4}  {ms:>+10.4f}% {mb:>+10.4f}% {md:>+10.4f}%  {ci_str:>22}  {pos}")
+    print(_row("A) Full sample",                  n_a, ms_a, mb_a, md_a, ci_lo_a, ci_hi_a))
+    print(_row("B) No-FAST (dur>=60s)",           n_b, ms_b, mb_b, md_b, ci_lo_b, ci_hi_b))
+    print(_row("C) No-FAST + native_price_ok=1",  n_c, ms_c, mb_c, md_c, ci_lo_c, ci_hi_c))
     print("=" * 70)
+    if n_c < 10:
+        print(f"  NOTE: cohort C has only n={n_c} pairs — CI will be wide until more native_ok=1 trades accumulate.")
 print("\n" + "=" * 70)
 conn.close()
