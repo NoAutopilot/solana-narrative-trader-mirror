@@ -947,11 +947,11 @@ if mode == "decision":
             return sum(vals)/len(vals), med, len(vals)
 
         features = [
-            ("entry_rv5m",            "rv5m (5m realized vol)",     True,  100.0),  # scale to %
-            ("entry_r_m5",            "r_m5 (5m return)",           False, 100.0),
+            ("entry_rv5m",            "rv5m (5m realized vol %)",  True,  100.0),  # decimal -> %
+            ("entry_r_m5",            "r_m5 (5m return %)",         False, 1.0),   # already in %
             ("entry_buy_count_ratio", "buy_ratio (buys/total)",     False, 1.0),
             ("entry_vol_accel",       "vol_accel",                  False, 1.0),
-            ("entry_jup_rt_pct",      "jup_rt_pct (round-trip)",   True,  100.0),
+            ("entry_jup_rt_pct",      "jup_rt_pct (round-trip %)", True,  100.0),  # decimal -> %
             ("entry_score",           "score",                      False, 1.0),
         ]
         print(f"  {'Feature':<28} {'FAST mean':>11} {'FAST med':>9} {'NOFAST mean':>12} {'NOFAST med':>11} {'n_F':>5} {'n_NF':>6}")
@@ -1109,6 +1109,283 @@ if mode == "decision":
         print()
         print("  NOTE: rv_1m and range_5m not stored in DB — use entry_rv5m as proxy.")
         print("  NOTE: entry_jup_implied_price = jup_exec_price_native (SOL/token) post v1.19 fix.")
+
+# ── FEATURE UNIT SANITY (P0.x scaling proof) ──────────────────────────────────
+# Goal: confirm r_m5/rv5m are not double-multiplied by 100.
+# r_m5 stored as decimal fraction (e.g. 0.16 = +16%); rv5m same.
+# Manual recomputation from universe_snapshot prices.
+print("\n" + "=" * 70)
+print("FEATURE UNIT SANITY CHECK (P0.x scaling proof)")
+print("=" * 70)
+print("  Source: r_m5 = DexScreener priceChange.m5 (already in %, e.g. 0.57 = +0.57%)")
+print("          rv5m = computed realized vol, stored as decimal (0.045 = 4.5% vol)")
+print("          range_5m = NOT stored in DB (no column; entry_rv5m is closest proxy)")
+print("  Manual r_m5 = (entry_price_native / price_5m_ago - 1) * 100  [as %]")
+print("  Stored r_m5 should match manual directly (no scaling needed)")
+print()
+
+# Fetch 5 diverse strategy legs for proof
+proof_trades = conn.execute("""
+  SELECT trade_id, mint_address, token_symbol, entered_at,
+         entry_price_native, entry_r_m5, entry_rv5m, entry_r_h1,
+         entry_round_trip_pct, lane
+  FROM shadow_trades_v1
+  WHERE strategy NOT LIKE 'baseline%' AND status='closed'
+    AND exit_reason != 'rollover_close'
+    AND entry_price_native IS NOT NULL
+    AND entry_r_m5 IS NOT NULL
+  GROUP BY mint_address
+  ORDER BY entered_at DESC
+  LIMIT 5
+""").fetchall()
+
+print(f"  {'trade':<10} {'token':<8} {'entered':<17} {'r_m5_stored_%':>13} {'r_m5_manual_%':>13} {'match?':>18} {'rv5m_stored':>12} {'rv5m_as_%':>10}")
+print(f"  {'-'*100}")
+for t in proof_trades:
+    ea_clean = t['entered_at'][:19]
+    mint = t['mint_address']
+    ep = t['entry_price_native']
+    # Manual r_m5 from universe_snapshot price 5m before entry
+    p5m_row = conn.execute("""
+      SELECT price_native FROM universe_snapshot
+      WHERE mint_address=?
+        AND replace(substr(snapshot_at,1,19),'T',' ') >= datetime(?, '-6 minutes')
+        AND replace(substr(snapshot_at,1,19),'T',' ') <= datetime(?, '-4 minutes')
+      ORDER BY snapshot_at DESC LIMIT 1
+    """, (mint, ea_clean, ea_clean)).fetchone()
+    r_m5_manual_pct = None
+    if p5m_row and p5m_row['price_native'] and ep and ep > 0:
+        r_m5_manual_pct = (ep / p5m_row['price_native'] - 1) * 100
+    r_m5_s   = t['entry_r_m5']   # stored in % (DexScreener priceChange.m5)
+    rv5m_s   = t['entry_rv5m']   # stored as decimal fraction
+    rv5m_pct = rv5m_s * 100 if rv5m_s is not None else None
+    # Match check: stored r_m5 (already %) should match manual (%) within 2pp
+    if r_m5_manual_pct is not None and r_m5_s is not None:
+        diff_direct = abs(r_m5_manual_pct - r_m5_s)
+        diff_x100   = abs(r_m5_manual_pct - r_m5_s * 100)
+        if diff_direct < 2.0:
+            match = "OK (stored=%)" 
+        elif diff_x100 < 2.0:
+            match = "BUG: stored=dec"
+        else:
+            match = f"MISMATCH d={diff_direct:.1f}"
+    else:
+        match = "N/A"
+    r_m5_s_str   = f"{r_m5_s:+.4f}%"  if r_m5_s   is not None else "None"
+    r_m5_man_str = f"{r_m5_manual_pct:+.4f}%" if r_m5_manual_pct is not None else "N/A"
+    rv5m_s_str   = f"{rv5m_s:+.6f}"   if rv5m_s   is not None else "None"
+    rv5m_pct_str = f"{rv5m_pct:+.4f}%" if rv5m_pct  is not None else "None"
+    print(f"  {t['trade_id'][:8]:<10} {t['token_symbol']:<8} {ea_clean[:16]:<17} {r_m5_s_str:>12} {r_m5_man_str:>12} {match:>18} {rv5m_s_str:>12} {rv5m_pct_str:>10}")
+
+print()
+print("  PERCENTILE TABLE (all closed strategy legs, no mismatch filter):")
+print("  Feature stored as decimal; displayed_pct = stored * 100")
+all_feat_rows = conn.execute("""
+  SELECT entry_r_m5, entry_rv5m, lane
+  FROM shadow_trades_v1
+  WHERE strategy NOT LIKE 'baseline%' AND status='closed'
+    AND exit_reason != 'rollover_close'
+""").fetchall()
+
+def _pct_str(vals, p):
+    if not vals: return "N/A"
+    vals_s = sorted(vals)
+    idx = max(0, min(len(vals_s)-1, int(len(vals_s)*p/100)))
+    return f"{vals_s[idx]*100:+.4f}%"
+
+# r_m5 stored in %, rv5m stored as decimal -> display rv5m*100
+r_m5_all  = [r['entry_r_m5']  for r in all_feat_rows if r['entry_r_m5']  is not None]
+rv5m_all  = [r['entry_rv5m']  for r in all_feat_rows if r['entry_rv5m']  is not None]
+
+def _pct_str_raw(vals, p):
+    """Percentile of values already in % (r_m5)."""
+    if not vals: return "N/A"
+    vals_s = sorted(vals)
+    idx = max(0, min(len(vals_s)-1, int(len(vals_s)*p/100)))
+    return f"{vals_s[idx]:+.4f}%"
+
+print(f"  {'Feature':<24} {'n':>5}  {'p1':>10}  {'p10':>10}  {'p50':>10}  {'p90':>10}  {'p99':>10}")
+print(f"  {'-'*80}")
+# r_m5 is already in % — display directly
+if r_m5_all:
+    print(f"  {'r_m5 (stored as %)':<24} {len(r_m5_all):>5}  {_pct_str_raw(r_m5_all,1):>10}  {_pct_str_raw(r_m5_all,10):>10}  {_pct_str_raw(r_m5_all,50):>10}  {_pct_str_raw(r_m5_all,90):>10}  {_pct_str_raw(r_m5_all,99):>10}")
+else:
+    print(f"  {'r_m5 (stored as %)':<24} {'N/A':>5}")
+# rv5m is stored as decimal — display *100
+if rv5m_all:
+    print(f"  {'rv5m (stored*100 = %)':<24} {len(rv5m_all):>5}  {_pct_str(rv5m_all,1):>10}  {_pct_str(rv5m_all,10):>10}  {_pct_str(rv5m_all,50):>10}  {_pct_str(rv5m_all,90):>10}  {_pct_str(rv5m_all,99):>10}")
+else:
+    print(f"  {'rv5m (stored*100 = %)':<24} {'N/A':>5}")
+
+# Per-lane percentiles
+lanes = sorted(set(r['lane'] for r in all_feat_rows if r['lane']))
+if lanes:
+    print()
+    print(f"  Per-lane p50 (r_m5 in %, rv5m*100 in %):")
+    print(f"  {'lane':<22} {'n':>4}  {'r_m5_p50_%':>12}  {'rv5m_p50_%':>12}")
+    print(f"  {'-'*56}")
+    for ln in lanes:
+        lr = [r for r in all_feat_rows if r['lane'] == ln]
+        lr_m5  = [r['entry_r_m5']  for r in lr if r['entry_r_m5']  is not None]
+        lrv5m  = [r['entry_rv5m']  for r in lr if r['entry_rv5m']  is not None]
+        print(f"  {ln:<22} {len(lr):>4}  {_pct_str_raw(lr_m5,50):>12}  {_pct_str(lrv5m,50):>12}")
+
+print()
+print("  VERDICT: r_m5 stored in % directly (DexScreener priceChange.m5). Display WITHOUT *100.")
+print("  rv5m stored as decimal fraction; display AS rv5m*100 to get %.")
+print("  The '-34.8' FAST mean was correct: mean(entry_r_m5) across FAST trades in % units.")
+print("  The FAST attribution table scale for r_m5 was WRONG (showed *100). Fixed below.")
+print("  range_5m is NOT stored in DB; entry_rv5m (5m realized vol) is the closest available proxy.")
+
+# ── HORIZON SENSITIVITY ORACLE ──────────────────────────────────────────────────────
+print("\n" + "=" * 70)
+print("HORIZON SENSITIVITY ORACLE (H=30m and H=120m)")
+print("=" * 70)
+print("  Source: universe_snapshot (1-min resolution, full coverage)")
+print("  MFE_Hm_gross  = (max_price_in_H_minutes / entry_price - 1) * 100")
+print("  MFE_Hm_net    = MFE_Hm_gross - fee_floor  [fee_floor = RT_pct*100 + 1.0%]")
+print("  Interpretation:")
+print("    %mfe_30m_net > 0 >> %mfe_actual_net > 0 -> EXIT PROBLEM (profit available, not captured)")
+print("    %mfe_120m_net >> %mfe_30m_net            -> HORIZON PROBLEM (need longer hold window)")
+print("    %mfe_120m_net stays near 0               -> SIGNAL/UNIVERSE PROBLEM (no edge exists)")
+print()
+
+# Fetch all strategy legs with entry price and round-trip
+horizon_trades = conn.execute("""
+  SELECT trade_id, mint_address, token_symbol, entered_at,
+         entry_price_native, entry_round_trip_pct, entry_score,
+         duration_sec, lane, price_mismatch,
+         mfe_gross_pct, mae_gross_pct, mfe_net_fee100_pct
+  FROM shadow_trades_v1
+  WHERE strategy NOT LIKE 'baseline%' AND status='closed'
+    AND exit_reason != 'rollover_close'
+    AND entry_price_native IS NOT NULL
+    AND price_mismatch = 0
+""").fetchall()
+
+def _compute_horizon_mfe_mae(mint, entered_at_str, entry_price, conn, h_minutes):
+    """Return (mfe_gross_pct, mae_gross_pct) over h_minutes from entry using universe_snapshot."""
+    ea_clean = entered_at_str[:19]
+    snaps = conn.execute("""
+      SELECT snapshot_at, price_native FROM universe_snapshot
+      WHERE mint_address=?
+        AND replace(substr(snapshot_at,1,19),'T',' ') >= datetime(?, '-1 minute')
+        AND replace(substr(snapshot_at,1,19),'T',' ') <= datetime(?, ?)
+      ORDER BY snapshot_at
+    """, (mint, ea_clean, ea_clean, f'+{h_minutes} minutes')).fetchall()
+    if not snaps or not entry_price or entry_price <= 0:
+        return None, None
+    max_p = min_p = None
+    entered_dt = None
+    try:
+        entered_dt = __import__('datetime').datetime.fromisoformat(entered_at_str.replace('Z','+00:00'))
+    except Exception:
+        return None, None
+    for s in snaps:
+        p = s['price_native']
+        if p is None or p <= 0: continue
+        max_p = max(max_p, p) if max_p is not None else p
+        min_p = min(min_p, p) if min_p is not None else p
+    if max_p is None: return None, None
+    mfe = (max_p / entry_price - 1) * 100
+    mae = (min_p / entry_price - 1) * 100
+    return mfe, mae
+
+# Build horizon data for all trades
+horizon_data = []  # (trade, mfe_30m, mae_30m, mfe_120m, mae_120m, fee_floor)
+print("  Computing horizon MFE/MAE from universe_snapshot (this may take a moment)...")
+for t in horizon_trades:
+    rt = t['entry_round_trip_pct'] or 0.005
+    fee_floor = rt * 100 + 1.0
+    mfe_30m,  mae_30m  = _compute_horizon_mfe_mae(t['mint_address'], t['entered_at'], t['entry_price_native'], conn, 30)
+    mfe_120m, mae_120m = _compute_horizon_mfe_mae(t['mint_address'], t['entered_at'], t['entry_price_native'], conn, 120)
+    horizon_data.append({
+        't': t,
+        'fee_floor': fee_floor,
+        'mfe_30m':  mfe_30m,
+        'mae_30m':  mae_30m,
+        'mfe_120m': mfe_120m,
+        'mae_120m': mae_120m,
+        'mfe_30m_net':  (mfe_30m  - fee_floor) if mfe_30m  is not None else None,
+        'mfe_120m_net': (mfe_120m - fee_floor) if mfe_120m is not None else None,
+    })
+
+def _horizon_cohort(label, hdata):
+    valid_30  = [h for h in hdata if h['mfe_30m_net']  is not None]
+    valid_120 = [h for h in hdata if h['mfe_120m_net'] is not None]
+    n_30  = len(valid_30)
+    n_120 = len(valid_120)
+    if n_30 == 0 and n_120 == 0:
+        print(f"  {label}: no horizon data available")
+        return
+    def _pct_gt(lst, key, thr):
+        vals = [h[key] for h in lst if h[key] is not None]
+        if not vals: return float('nan'), 0, 0
+        n_gt = sum(1 for v in vals if v > thr)
+        return 100*n_gt/len(vals), n_gt, len(vals)
+    def _avg(lst, key):
+        vals = [h[key] for h in lst if h[key] is not None]
+        return sum(vals)/len(vals) if vals else float('nan')
+    pgt0_30,  n_gt0_30,  n30  = _pct_gt(valid_30,  'mfe_30m_net',  0)
+    pgt25_30, n_gt25_30, _    = _pct_gt(valid_30,  'mfe_30m_net',  0.25)
+    pgt0_120, n_gt0_120, n120 = _pct_gt(valid_120, 'mfe_120m_net', 0)
+    pgt25_120,n_gt25_120,_    = _pct_gt(valid_120, 'mfe_120m_net', 0.25)
+    avg_mfe_30m_net  = _avg(valid_30,  'mfe_30m_net')
+    avg_mfe_120m_net = _avg(valid_120, 'mfe_120m_net')
+    avg_mae_30m      = _avg(valid_30,  'mae_30m')
+    avg_mae_120m     = _avg(valid_120, 'mae_120m')
+    # Actual MFE from DB for comparison
+    actual_mfe_vals = [h['t']['mfe_gross_pct']*100 - h['fee_floor']
+                       for h in hdata if h['t']['mfe_gross_pct'] is not None]
+    pgt0_actual = 100*sum(1 for v in actual_mfe_vals if v > 0)/len(actual_mfe_vals) if actual_mfe_vals else float('nan')
+    avg_mfe_actual_net = sum(actual_mfe_vals)/len(actual_mfe_vals) if actual_mfe_vals else float('nan')
+    print(f"  {label} (n_30m={n30}, n_120m={n120}):")
+    print(f"    {'Metric':<36} {'actual':>10} {'H=30m':>10} {'H=120m':>10}")
+    print(f"    {'-'*68}")
+    print(f"    {'% mfe_net > 0':<36} {pgt0_actual:>9.1f}% {pgt0_30:>9.1f}% {pgt0_120:>9.1f}%")
+    print(f"    {'% mfe_net > +0.25%':<36} {'N/A':>10} {pgt25_30:>9.1f}% {pgt25_120:>9.1f}%")
+    print(f"    {'avg mfe_net_fee100':<36} {avg_mfe_actual_net:>+9.4f}% {avg_mfe_30m_net:>+9.4f}% {avg_mfe_120m_net:>+9.4f}%")
+    print(f"    {'avg mae_gross':<36} {'N/A':>10} {avg_mae_30m:>+9.4f}% {avg_mae_120m:>+9.4f}%")
+    # Diagnosis
+    if pgt0_120 > pgt0_actual + 20 and pgt0_120 > 25:
+        diag = "HORIZON PROBLEM: longer hold materially improves monetizability"
+    elif pgt0_120 <= pgt0_actual + 10 and pgt0_120 < 20:
+        diag = "SIGNAL/UNIVERSE PROBLEM: profit unavailable even at 120m — change universe or regime"
+    elif pgt0_120 > 25 and avg_mfe_120m_net > 0:
+        diag = "HORIZON PROBLEM + EXIT PROBLEM: profit available at 120m but not captured"
+    else:
+        diag = "MIXED: marginal improvement with longer horizon"
+    print(f"    Diagnosis: {diag}")
+
+# Build cohorts (same as sensitivity summaries)
+all_hdata = horizon_data
+nofast_hdata = [h for h in horizon_data
+                if not (isinstance(h['t']['duration_sec'], (int, float)) and h['t']['duration_sec'] < 60)]
+# HIGH-SCORE + NO-FAST top tercile
+hdata_scored = [h for h in horizon_data if h['t']['entry_score'] is not None]
+if len(hdata_scored) >= 6:
+    scores_h = sorted(h['t']['entry_score'] for h in hdata_scored)
+    t2_h = scores_h[2 * len(scores_h) // 3]
+    highscore_nofast_hdata = [h for h in nofast_hdata
+                               if h['t']['entry_score'] is not None and h['t']['entry_score'] > t2_h]
+    hs_label = f"C) HIGH-SCORE+NO-FAST (score>{t2_h:.2f})"
+else:
+    highscore_nofast_hdata = []
+    hs_label = "C) HIGH-SCORE+NO-FAST (insufficient data)"
+
+_horizon_cohort("A) FULL", all_hdata)
+print()
+_horizon_cohort("B) NO-FAST", nofast_hdata)
+print()
+_horizon_cohort(hs_label, highscore_nofast_hdata)
+print()
+
+# Coverage note
+n_with_snaps = sum(1 for h in horizon_data if h['mfe_30m'] is not None)
+print(f"  Coverage: {n_with_snaps}/{len(horizon_data)} trades have universe_snapshot data for horizon oracle.")
+if n_with_snaps < len(horizon_data):
+    missing_mints = list(set(h['t']['mint_address'] for h in horizon_data if h['mfe_30m'] is None))[:5]
+    print(f"  Missing mints (sample): {missing_mints}")
 
 # ── n=50 VERDICT GRID ────────────────────────────────────────────────────────
 if n_pairs >= 20:  # show grid from n=20 onwards so it is always visible
