@@ -241,6 +241,16 @@ PF_MATURE_RANGE_MULT        = 3.0        # range_5m must be <= this * rv_5m
 R_M5_CHASE_CAP              = 1.0        # % — skip entry if r_m5 > this
 ANTI_CHASE_FILTER_ENABLED   = True
 
+# ── FAST_RISK_GATE (v1.19, feature-flag, default OFF) ────────────────────────
+# When ON: rejects candidates whose mint is in the fast_blacklist table.
+# A mint is added to fast_blacklist when a strategy leg closes SL with
+# duration_sec < 60s. It stays blacklisted for FAST_BLACKLIST_DURATION_H hours.
+# This converts post-hoc FAST exclusion into a prospective, testable rule.
+# Deploy under a NEW signature by setting this to True in config.
+# Current run (sig=01f9bdf7d0385d0d) keeps this OFF until n_pairs=50.
+FAST_RISK_GATE_ENABLED      = False
+FAST_BLACKLIST_DURATION_H   = 12   # hours a mint stays blacklisted after FAST SL
+
 # P3: pullback_score_rank weights
 # score = W_DEPTH*z_depth + W_VOL_ACCEL*vol_accel + W_BUY_RATIO*(buy_ratio-0.5) - W_PENALTY*risk_flags
 PSR_W_DEPTH                 = 1.0
@@ -595,6 +605,14 @@ def init_tables():
     c.execute("CREATE INDEX IF NOT EXISTS idx_fsl_at ON filter_scan_log(logged_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sv1_run ON shadow_trades_v1(run_id)")
     # v1.18: lp_removal_log — one row per lp_removal exit trigger
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS fast_blacklist (
+        mint_address    TEXT NOT NULL,
+        blacklisted_at  TEXT NOT NULL,
+        expires_at      TEXT NOT NULL,
+        reason          TEXT,
+        PRIMARY KEY (mint_address, blacklisted_at)
+    )""")
     c.execute("""
     CREATE TABLE IF NOT EXISTS lp_removal_log (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1399,8 +1417,46 @@ def _check_tradeable(row: dict) -> tuple[bool, str]:
     else:
         if cached_rt > FRICTION_GATE_MAX_RT:
             return False, f"jup:rt={cached_rt*100:.2f}%>{FRICTION_GATE_MAX_RT*100:.1f}%"
+    # FAST_RISK_GATE (feature-flag, default OFF)
+    if FAST_RISK_GATE_ENABLED:
+        mint = row.get("mint_address", "")
+        if mint and _is_fast_blacklisted(mint):
+            return False, "fast_blacklist"
     return True, "ok"
 
+def _is_fast_blacklisted(mint: str) -> bool:
+    """Return True if mint is currently in the fast_blacklist (not expired)."""
+    try:
+        conn = get_conn()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        row = conn.execute(
+            "SELECT 1 FROM fast_blacklist WHERE mint_address=? AND expires_at > ? LIMIT 1",
+            (mint, now_iso)
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+def add_to_fast_blacklist(mint: str, reason: str = "fast_sl"):
+    """Add mint to fast_blacklist for FAST_BLACKLIST_DURATION_H hours.
+    Called when a strategy leg closes SL with duration_sec < 60s.
+    No-op when FAST_RISK_GATE_ENABLED is False (records for observability only).
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(hours=FAST_BLACKLIST_DURATION_H)
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO fast_blacklist (mint_address, blacklisted_at, expires_at, reason) "
+            "VALUES (?, ?, ?, ?)",
+            (mint, now.isoformat(), expires.isoformat(), reason)
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"FAST_BLACKLIST add mint={mint[:8]} expires={expires.isoformat()[:16]} reason={reason}")
+    except Exception as e:
+        logger.warning(f"FAST_BLACKLIST insert failed: {e}")
 
 def _count_tradeable_without(all_rows: list[dict], skip_gate: str) -> int:
     """Instrumentation only — count how many tokens from all_rows would pass
@@ -2232,6 +2288,19 @@ def close_trade(trade: dict, current: dict, reason: str, cross: dict | None = No
         f"mfe={mfe_val*100:+.4f}% mae={mae_val*100:+.4f}% fee100={pnl_fee100*100:+.4f}% "
         f"dur={duration_sec_val}s polls={poll_count_val}"
     )
+    # FAST_RISK_GATE: record FAST SL exits to fast_blacklist (always, even when gate is OFF)
+    # Gate=OFF: records for observability; Gate=ON: actively blocks re-entry for 12h
+    is_strategy_leg = not trade.get("strategy", "").startswith("baseline")
+    if (is_strategy_leg
+            and exit_reason_effective_val == "sl"
+            and duration_sec_val is not None
+            and duration_sec_val < 60):
+        mint_addr = trade.get("mint_address", "")
+        if mint_addr:
+            add_to_fast_blacklist(
+                mint_addr,
+                reason=f"fast_sl:dur={duration_sec_val:.1f}s:polls={poll_count_val}"
+            )
 
 # # ── OVERSHOOT TRACKING ───────────────────────────────────────────────────
 # Maps trade_id -> {"sl_crossed_at": ISO, "tp_crossed_at": ISO,

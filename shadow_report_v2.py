@@ -724,7 +724,14 @@ if mode == "decision":
     print("\n" + "=" * 70)
     print("DECISION SUMMARY")
     print("=" * 70)
+    # Absolute profitability
+    strat_fee100_vals = [(p["s_fee100"] or 0.0) * 100 for p in pairs]
+    base_fee100_vals  = [(p["b_fee100"] or 0.0) * 100 for p in pairs]
+    mean_strat_abs = sum(strat_fee100_vals) / len(strat_fee100_vals)
+    mean_base_abs  = sum(base_fee100_vals)  / len(base_fee100_vals)
     print(f"  n_pairs         : {n}")
+    print(f"  mean strategy_fee100% : {mean_strat_abs:+.4f}%  (net of RT+1% floor)")
+    print(f"  mean baseline_fee100% : {mean_base_abs:+.4f}%")
     print(f"  mean delta      : {mean_d:+.4f}%  (fee100, strategy - baseline)")
     print(f"  median delta    : {median_d:+.4f}%")
     print(f"  trimmed mean    : {trimmed_mean:+.4f}%  (10% trim each side, n={len(trimmed)})")
@@ -763,7 +770,11 @@ if mode == "decision":
             nf_verdict = "NEGATIVE EDGE"
         else:
             nf_verdict = "INCONCLUSIVE"
+        nf_strat_abs = sum((p["s_fee100"] or 0.0)*100 for p in nofast_pairs) / n_nofast
+        nf_base_abs  = sum((p["b_fee100"] or 0.0)*100 for p in nofast_pairs) / n_nofast
         print(f"  NO-FAST SUMMARY (n={n_nofast})")
+        print(f"    mean strategy_fee100% : {nf_strat_abs:+.4f}%")
+        print(f"    mean baseline_fee100% : {nf_base_abs:+.4f}%")
         print(f"    mean delta    : {nf_mean:+.4f}%")
         print(f"    median delta  : {nf_median:+.4f}%")
         print(f"    trimmed mean  : {nf_trimmed_mean:+.4f}%  (n={len(nf_trimmed)})")
@@ -772,6 +783,65 @@ if mode == "decision":
         print(f"    VERDICT       : {nf_verdict}")
     else:
         print(f"  NO-FAST SUMMARY: only {n_nofast} pairs remain after excluding FAST — insufficient for CI.")
+
+    # ── FAST DIAGNOSTICS TABLE ──────────────────────────────────────────────────
+    if n_fast > 0:
+        print(f"\n" + "=" * 70)
+        print(f"FAST EXIT DIAGNOSTICS (strategy duration_sec < 60s, n={n_fast})")
+        print("=" * 70)
+        print("Goal: identify which entry features predict FAST risk.")
+        print()
+        # Fetch full entry feature data for FAST strategy legs
+        fast_mints = [p["s_mint"] for p in fast_pairs if p["s_mint"]]
+        fast_run_ids = list(set(p["s_run"] for p in fast_pairs))
+        # Build IN clause
+        in_m = "(" + ",".join("?"*len(fast_mints)) + ")"
+        in_r = "(" + ",".join("?"*len(fast_run_ids)) + ")"
+        fast_rows = conn.execute(
+            f"SELECT trade_id, token_symbol, mint_address, mint_prefix, lane, entry_score, "
+            f"duration_sec, poll_count, "
+            f"entry_rv5m, entry_r_m5, entry_buy_count_ratio, entry_vol_accel, "
+            f"entry_jup_rt_pct, entry_price_native, entry_jup_implied_price, price_mismatch, "
+            f"exit_reason, gross_pnl_pct, shadow_pnl_pct_fee100, "
+            f"baseline_trigger_id "
+            f"FROM shadow_trades_v1 "
+            f"WHERE mint_address IN {in_m} AND run_id IN {in_r} "
+            f"AND strategy NOT LIKE 'baseline%' AND duration_sec < 60 AND status='closed'",
+            fast_mints + fast_run_ids
+        ).fetchall()
+        # Print header
+        print(f"  {'#':<3} {'token(mint)':<18} {'lane':<16} {'score':>7} {'dur_s':>6} {'polls':>5} "
+              f"{'rv5m':>7} {'r_m5':>7} {'buy_r':>7} {'vol_ac':>7} "
+              f"{'jup_rt':>7} {'dex_nat':>12} {'jup_nat':>12} {'mm_pct':>8} {'mm':>3} "
+              f"{'exit':<8} {'gross%':>8} {'f100%':>8} {'delta%':>8}")
+        print("-" * 155)
+        for i, fr in enumerate(fast_rows, 1):
+            # Find matching baseline delta
+            fr_run = fr["run_id"][:8] if "run_id" in fr.keys() else ""
+            fp = next((p for p in fast_pairs
+                       if p["s_mint"] == fr["mint_address"]
+                       and (not fr_run or p["s_run"][:8] == fr_run)), None)
+            delta_str = f"{((fp['s_fee100'] or 0)*100 - (fp['b_fee100'] or 0)*100):+.4f}%" if fp else "N/A"
+            dex_nat = fr["entry_price_native"]
+            jup_nat = fr["entry_jup_implied_price"]
+            if dex_nat and jup_nat and dex_nat > 0:
+                mm_pct = (jup_nat / dex_nat - 1) * 100
+                mm_pct_str = f"{mm_pct:+.2f}%"
+            else:
+                mm_pct_str = "N/A"
+            tok_disp = f"{fr['token_symbol']}({(fr['mint_prefix'] or fr['mint_address'] or '')[:8]})"
+            print(f"  {i:<3} {tok_disp:<18} {(fr['lane'] or '?'):<16} "
+                  f"{(fr['entry_score'] or 0):>7.3f} {(fr['duration_sec'] or 0):>6.1f} {(fr['poll_count'] or 0):>5} "
+                  f"{(fr['entry_rv5m'] or 0)*100:>6.3f}% {(fr['entry_r_m5'] or 0):>7.3f} "
+                  f"{(fr['entry_buy_count_ratio'] or 0):>7.4f} {(fr['entry_vol_accel'] or 0):>7.4f} "
+                  f"{(fr['entry_jup_rt_pct'] or 0)*100:>6.3f}% "
+                  f"{(dex_nat or 0):.4e} {(jup_nat or 0):.4e} "
+                  f"{mm_pct_str:>8} {(fr['price_mismatch'] or 0):>3} "
+                  f"{(fr['exit_reason'] or '?'):<8} {(fr['gross_pnl_pct'] or 0)*100:>+7.4f}% "
+                  f"{(fr['shadow_pnl_pct_fee100'] or 0)*100:>+7.4f}% {delta_str:>8}")
+        print()
+        print("  NOTE: rv_1m and range_5m not stored in DB — use entry_rv5m as proxy.")
+        print("  NOTE: entry_jup_implied_price = jup_exec_price_native (SOL/token) post v1.19 fix.")
 
 print("\n" + "=" * 70)
 conn.close()
