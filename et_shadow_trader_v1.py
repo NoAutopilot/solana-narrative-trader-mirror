@@ -1027,54 +1027,66 @@ def _check_jup_health():
         logger.warning(f"JUP_HEALTH: ERROR {e} — Jupiter unavailable.")
 
 
-# ── Mint decimals cache + resolver (v1.19 fix) ──────────────────────────────
-# Used by the native-to-native price mismatch check to avoid inferring decimals
-# from the Dex price ratio (which is imprecise for tokens with unusual decimals).
-MINT_DECIMALS_CACHE: dict[str, int] = {}
+# ── Mint decimals cache + resolver ──────────────────────────────────────────────
+# Used by the native-to-native price mismatch check.
+# Negative cache prevents repeated lookups for mints that consistently fail.
+MINT_DECIMALS_CACHE:    dict[str, int]   = {}  # mint -> decimals
+MINT_DECIMALS_NEGCACHE: dict[str, float] = {}  # mint -> last_fail_ts
 
 def get_mint_decimals(mint: str) -> int | None:
     """Return token decimals for `mint`.
-    1) Cache hit.
-    2) Jupiter Tokens API V2 (already keyed — fast, no extra cost).
-    3) Solana public RPC getTokenSupply fallback.
-    Returns None if both sources fail; caller must skip mismatch classification.
+    1) Positive cache hit.
+    2) Negative cache: skip if failed within last 300s.
+    3) Jupiter Tokens V2 search (lite-api, preferred).
+    4) Solana RPC getTokenSupply fallback (Helius if configured).
+    Returns None if both sources fail; caller skips mismatch classification.
     """
+    import time
     if mint in MINT_DECIMALS_CACHE:
         return MINT_DECIMALS_CACHE[mint]
 
-    # Option A: Jupiter Tokens API V2
+    # avoid spamming recently-failed mints
+    last_fail = MINT_DECIMALS_NEGCACHE.get(mint)
+    if last_fail is not None and (time.time() - last_fail) < 300:
+        return None
+
+    # Option A: Jupiter Tokens V2 search (lite-api, no auth required but key accepted)
     try:
         r = requests.get(
-            f"{JUPITER_BASE_URL}/tokens/v1/{mint}",
+            "https://lite-api.jup.ag/tokens/v2/search",
+            params={"query": mint},
             headers={"x-api-key": JUPITER_API_KEY},
             timeout=5,
         )
         if r.status_code == 200:
-            decimals = int(r.json().get("decimals", -1))
-            if decimals >= 0:
-                MINT_DECIMALS_CACHE[mint] = decimals
-                return decimals
+            arr = r.json() or []
+            hit = next(
+                (x for x in arr if x.get("id") == mint or x.get("address") == mint),
+                None,
+            )
+            if hit is not None:
+                decimals = int(hit.get("decimals", -1))
+                if decimals >= 0:
+                    MINT_DECIMALS_CACHE[mint] = decimals
+                    return decimals
     except Exception:
         pass
 
-    # Option B: Solana RPC getTokenSupply (uses Helius if configured, else public)
+    # Option B: Solana RPC getTokenSupply (Helius if configured, else public mainnet)
     try:
         rpc_url = RPC_URL or "https://api.mainnet-beta.solana.com"
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getTokenSupply",
-            "params": [mint],
-        }
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
         r = requests.post(rpc_url, json=payload, timeout=5)
         if r.status_code == 200:
-            result = r.json().get("result", {}) or {}
-            decimals = int((result.get("value") or {}).get("decimals", -1))
+            result = (r.json() or {}).get("result") or {}
+            decimals = int(((result.get("value") or {}).get("decimals", -1)))
             if decimals >= 0:
                 MINT_DECIMALS_CACHE[mint] = decimals
                 return decimals
     except Exception:
         pass
 
+    MINT_DECIMALS_NEGCACHE[mint] = time.time()
     return None
 
 
@@ -1143,6 +1155,11 @@ def get_jupiter_rt_estimate(
                     jup_quote_data = {
                         "inAmount":     int(data.get("inAmount") or sol_in_lamports),
                         "outAmount":    int(data.get("outAmount") or 0),
+                        "inputMint":    data.get("inputMint", WSOL_MINT),
+                        "outputMint":   data.get("outputMint", mint),
+                        "routePlan":    route_plan,
+                        "contextSlot":  int(data.get("contextSlot") or 0),
+                        # legacy flat keys kept for backward compat
                         "route_label":  swap_info.get("label", "?"),
                         "amm_key":      swap_info.get("ammKey", "?"),
                         "context_slot": int(data.get("contextSlot") or 0),
@@ -1655,10 +1672,12 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
         logger.info(f"SKIP {strategy} {mint[:8]}: Jupiter RT {jup_rt*100:.2f}% > gate {FRICTION_GATE_MAX_RT*100:.1f}%")
         return None
     # v1.19 (robust): native-to-native price mismatch check
-    # Uses real mint decimals (Jupiter Tokens V2 + RPC fallback) instead of
-    # inferring from the Dex price ratio. Amounts cast to int (Jupiter returns strings).
-    # Decimal math used to avoid float drift on very small/large token prices.
+    # Universe is SOL-quote only, so mint is always the base token and
+    # dex_price_native = priceNative (SOL per token) directly.
+    # Amounts cast to int (Jupiter returns strings). Decimal math (no float drift).
+    # inputMint/outputMint from quote enforced to confirm SOL->token direction.
     from decimal import Decimal
+    import time as _time
     dex_price_native  = float(row.get("price_native") or 0.0)  # SOL per token from DexScreener
     jup_exec_price_native = None
     jup_exec_vs_dex_pct   = None
@@ -1666,12 +1685,20 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
     jup_implied_price     = None  # kept for DB column (now stores jup_exec_price_native)
     if jup_quote_data is not None and dex_price_native > 0:
         try:
-            in_lamports = int(jup_quote_data["inAmount"])   # Jupiter returns strings
-            out_raw     = int(jup_quote_data["outAmount"])  # Jupiter returns strings
+            in_lamports  = int(jup_quote_data["inAmount"])   # Jupiter returns strings
+            out_raw      = int(jup_quote_data["outAmount"])  # Jupiter returns strings
+            input_mint   = jup_quote_data.get("inputMint")
+            output_mint  = jup_quote_data.get("outputMint")
         except (KeyError, ValueError, TypeError):
-            in_lamports = 0
-            out_raw = 0
-        if in_lamports > 0 and out_raw > 0:
+            in_lamports = out_raw = 0
+            input_mint = output_mint = None
+        # Enforce SOL->token direction (input=wSOL, output=mint being bought)
+        if (
+            input_mint in (WSOL_MINT, "So11111111111111111111111111111111111111111")
+            and output_mint == mint
+            and in_lamports > 0
+            and out_raw > 0
+        ):
             decimals = get_mint_decimals(mint)
             if decimals is not None:
                 in_sol     = Decimal(in_lamports) / Decimal(10**9)
@@ -1684,10 +1711,10 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
                     if lane == "large_cap_ray" and abs(jup_exec_vs_dex_pct) > 0.02:
                         price_mismatch_flag = 1
                         route_plan = jup_quote_data.get("routePlan") or []
-                        swap0  = (route_plan[0].get("swapInfo") if route_plan else {}) or {}
-                        label  = swap0.get("label", jup_quote_data.get("route_label", "?"))
-                        amm_k  = swap0.get("ammKey",  jup_quote_data.get("amm_key",   "?"))
-                        slot   = jup_quote_data.get("contextSlot", jup_quote_data.get("context_slot", "?"))
+                        swap0 = (route_plan[0].get("swapInfo") if route_plan else {}) or {}
+                        label = swap0.get("label", "?")
+                        amm_k = swap0.get("ammKey", "?")
+                        slot  = jup_quote_data.get("contextSlot", "?")
                         logger.info(
                             f"PRICE_MISMATCH {strategy} {row.get('token_symbol','?')} ({mint[:8]}): "
                             f"dex_native={dex_price_native:.10f} jup_exec_native={jup_exec_price_native:.10f} "
