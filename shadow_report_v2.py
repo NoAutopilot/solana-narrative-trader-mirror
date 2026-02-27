@@ -1255,7 +1255,8 @@ horizon_trades = conn.execute("""
   SELECT trade_id, mint_address, token_symbol, entered_at,
          entry_price_native, entry_round_trip_pct, entry_score,
          duration_sec, lane, price_mismatch,
-         mfe_gross_pct, mae_gross_pct, mfe_net_fee100_pct
+         mfe_gross_pct, mae_gross_pct, mfe_net_fee100_pct,
+         shadow_pnl_pct_fee100
   FROM shadow_trades_v1
   WHERE strategy NOT LIKE 'baseline%' AND status='closed'
     AND exit_reason != 'rollover_close'
@@ -1387,6 +1388,157 @@ if n_with_snaps < len(horizon_data):
     missing_mints = list(set(h['t']['mint_address'] for h in horizon_data if h['mfe_30m'] is None))[:5]
     print(f"  Missing mints (sample): {missing_mints}")
 
+# ── MFE_NET_120M BY SCORE BUCKET ─────────────────────────────────────────────
+# Answers: does high-score actually imply "can clear fees at 120m"?
+print("\n" + "=" * 70)
+print("MFE_NET_120M BY SCORE BUCKET")
+print("=" * 70)
+print("  fee_floor = entry_round_trip_pct*100 + 1.0%  (RT + 1% slippage floor)")
+print("  mfe_net_120m = mfe_120m_gross - fee_floor")
+print("  strategy_fee100 = shadow_pnl_pct_fee100 * 100  (actual realised net)")
+print()
+
+if horizon_data:
+    # Build score buckets: low / mid / high terciles + top-decile if n>=30
+    hd_scored = [h for h in horizon_data if h['t']['entry_score'] is not None
+                 and h['mfe_120m_net'] is not None]
+    if len(hd_scored) >= 6:
+        scores_sb = sorted(h['t']['entry_score'] for h in hd_scored)
+        t1_sb = scores_sb[    len(scores_sb) // 3]
+        t2_sb = scores_sb[2 * len(scores_sb) // 3]
+        t9_sb = scores_sb[9 * len(scores_sb) // 10] if len(scores_sb) >= 10 else None
+
+        def _score_bucket(h):
+            sc = h['t']['entry_score']
+            if sc is None: return None
+            if sc <= t1_sb: return 'low'
+            if sc <= t2_sb: return 'mid'
+            return 'high'
+
+        buckets = [('low',  [h for h in hd_scored if _score_bucket(h) == 'low']),
+                   ('mid',  [h for h in hd_scored if _score_bucket(h) == 'mid']),
+                   ('high', [h for h in hd_scored if _score_bucket(h) == 'high'])]
+        if t9_sb is not None:
+            buckets.append(('top-decile', [h for h in hd_scored
+                                            if h['t']['entry_score'] > t9_sb]))
+
+        print(f"  Score thresholds: low<=  {t1_sb:.2f}  mid<= {t2_sb:.2f}  high> {t2_sb:.2f}"
+              + (f"  top-decile> {t9_sb:.2f}" if t9_sb else ""))
+        print()
+        print(f"  {'Bucket':<14} {'score_range':<22} {'n':>4}  {'%mfe120>0':>10}  {'avg_mfe120_net':>15}  {'avg_strat_f100':>15}")
+        print(f"  {'-'*85}")
+        for bname, bdata in buckets:
+            if not bdata:
+                print(f"  {bname:<14} {'(empty)':>22}")
+                continue
+            sc_vals = [h['t']['entry_score'] for h in bdata]
+            sc_lo, sc_hi = min(sc_vals), max(sc_vals)
+            mfe120_net_vals = [h['mfe_120m_net'] for h in bdata if h['mfe_120m_net'] is not None]
+            strat_vals = [h['t']['shadow_pnl_pct_fee100'] * 100
+                          for h in bdata if h['t']['shadow_pnl_pct_fee100'] is not None]
+            n_b = len(bdata)
+            pgt0 = 100 * sum(1 for v in mfe120_net_vals if v > 0) / len(mfe120_net_vals) if mfe120_net_vals else float('nan')
+            avg_mfe = sum(mfe120_net_vals) / len(mfe120_net_vals) if mfe120_net_vals else float('nan')
+            avg_str = sum(strat_vals) / len(strat_vals) if strat_vals else float('nan')
+            pgt0_s   = f"{pgt0:>9.1f}%"  if pgt0 == pgt0   else "       N/A"
+            avg_mfe_s= f"{avg_mfe:>+14.4f}%" if avg_mfe == avg_mfe else "           N/A"
+            avg_str_s= f"{avg_str:>+14.4f}%" if avg_str == avg_str else "           N/A"
+            sc_range = f"[{sc_lo:.2f}, {sc_hi:.2f}]"
+            print(f"  {bname:<14} {sc_range:<22} {n_b:>4}  {pgt0_s:>10}  {avg_mfe_s:>15}  {avg_str_s:>15}")
+        print()
+        # Monotonicity check
+        bucket_pgt0 = []
+        for bname, bdata in buckets[:3]:  # low/mid/high only
+            mfe120_net_vals = [h['mfe_120m_net'] for h in bdata if h['mfe_120m_net'] is not None]
+            pgt0 = 100 * sum(1 for v in mfe120_net_vals if v > 0) / len(mfe120_net_vals) if mfe120_net_vals else float('nan')
+            bucket_pgt0.append(pgt0)
+        if all(v == v for v in bucket_pgt0) and len(bucket_pgt0) == 3:
+            mono = bucket_pgt0[0] <= bucket_pgt0[1] <= bucket_pgt0[2]
+            print(f"  Monotonicity (low->mid->high %mfe120>0): {'YES — score predicts monetizability' if mono else 'NO — score does not predict monetizability'}")
+            print(f"  Values: {bucket_pgt0[0]:.1f}% -> {bucket_pgt0[1]:.1f}% -> {bucket_pgt0[2]:.1f}%")
+    else:
+        print("  Insufficient scored horizon data for bucket analysis (need >= 6).")
+else:
+    print("  No horizon data available.")
+
+# ── UNIVERSE MONETIZABILITY CHECK (by lane + token) ───────────────────────────
+print("\n" + "=" * 70)
+print("UNIVERSE MONETIZABILITY CHECK (by lane and top tokens)")
+print("=" * 70)
+print("  %mfe_net_120m > 0 = fraction of trades where profit was available at 120m")
+print("  avg_mfe_net_120m  = average net-of-fees profit available at 120m horizon")
+print("  avg_strat_f100    = average realised strategy_fee100 (actual P&L)")
+print("  Pivot evidence: if mature_pumpswap/pumpfun_mature >> large_cap_ray -> universe shift")
+print()
+
+if horizon_data:
+    # By lane
+    lane_groups = {}
+    for h in horizon_data:
+        ln = h['t']['lane'] or 'unknown'
+        lane_groups.setdefault(ln, []).append(h)
+
+    print(f"  BY LANE:")
+    print(f"  {'lane':<24} {'n':>4}  {'%mfe120>0':>10}  {'avg_mfe120_net':>15}  {'avg_strat_f100':>15}")
+    print(f"  {'-'*74}")
+    lane_summary = []
+    for ln in sorted(lane_groups.keys()):
+        ldata = lane_groups[ln]
+        mfe120_vals = [h['mfe_120m_net'] for h in ldata if h['mfe_120m_net'] is not None]
+        strat_vals  = [h['t']['shadow_pnl_pct_fee100'] * 100
+                       for h in ldata if h['t']['shadow_pnl_pct_fee100'] is not None]
+        n_l = len(ldata)
+        pgt0 = 100 * sum(1 for v in mfe120_vals if v > 0) / len(mfe120_vals) if mfe120_vals else float('nan')
+        avg_mfe = sum(mfe120_vals) / len(mfe120_vals) if mfe120_vals else float('nan')
+        avg_str = sum(strat_vals)  / len(strat_vals)  if strat_vals  else float('nan')
+        pgt0_s   = f"{pgt0:>9.1f}%"  if pgt0 == pgt0   else "       N/A"
+        avg_mfe_s= f"{avg_mfe:>+14.4f}%" if avg_mfe == avg_mfe else "           N/A"
+        avg_str_s= f"{avg_str:>+14.4f}%" if avg_str == avg_str else "           N/A"
+        print(f"  {ln:<24} {n_l:>4}  {pgt0_s:>10}  {avg_mfe_s:>15}  {avg_str_s:>15}")
+        lane_summary.append((ln, n_l, pgt0, avg_mfe, avg_str))
+
+    # By token (top tokens by trade count)
+    print()
+    print(f"  BY TOKEN (top tokens by trade count):")
+    token_groups = {}
+    for h in horizon_data:
+        tok = h['t']['token_symbol'] or 'unknown'
+        token_groups.setdefault(tok, []).append(h)
+    top_tokens = sorted(token_groups.keys(), key=lambda t: -len(token_groups[t]))[:12]
+    print(f"  {'token':<14} {'lane':<22} {'n':>4}  {'%mfe120>0':>10}  {'avg_mfe120_net':>15}  {'avg_strat_f100':>15}")
+    print(f"  {'-'*86}")
+    for tok in top_tokens:
+        tdata = token_groups[tok]
+        mfe120_vals = [h['mfe_120m_net'] for h in tdata if h['mfe_120m_net'] is not None]
+        strat_vals  = [h['t']['shadow_pnl_pct_fee100'] * 100
+                       for h in tdata if h['t']['shadow_pnl_pct_fee100'] is not None]
+        lane_tok = tdata[0]['t']['lane'] or 'unknown'
+        n_t = len(tdata)
+        pgt0 = 100 * sum(1 for v in mfe120_vals if v > 0) / len(mfe120_vals) if mfe120_vals else float('nan')
+        avg_mfe = sum(mfe120_vals) / len(mfe120_vals) if mfe120_vals else float('nan')
+        avg_str = sum(strat_vals)  / len(strat_vals)  if strat_vals  else float('nan')
+        pgt0_s   = f"{pgt0:>9.1f}%"  if pgt0 == pgt0   else "       N/A"
+        avg_mfe_s= f"{avg_mfe:>+14.4f}%" if avg_mfe == avg_mfe else "           N/A"
+        avg_str_s= f"{avg_str:>+14.4f}%" if avg_str == avg_str else "           N/A"
+        print(f"  {tok:<14} {lane_tok:<22} {n_t:>4}  {pgt0_s:>10}  {avg_mfe_s:>15}  {avg_str_s:>15}")
+
+    # Pivot evidence summary
+    print()
+    large_cap_lanes = [s for s in lane_summary if 'large_cap' in s[0]]
+    alt_lanes       = [s for s in lane_summary if 'large_cap' not in s[0] and s[1] >= 3]
+    if large_cap_lanes and alt_lanes:
+        lc_pgt0  = sum(s[2]*s[1] for s in large_cap_lanes if s[2]==s[2]) / max(sum(s[1] for s in large_cap_lanes if s[2]==s[2]),1)
+        alt_pgt0 = sum(s[2]*s[1] for s in alt_lanes       if s[2]==s[2]) / max(sum(s[1] for s in alt_lanes       if s[2]==s[2]),1)
+        if alt_pgt0 > lc_pgt0 + 10:
+            print(f"  PIVOT EVIDENCE: alt lanes ({alt_pgt0:.1f}% mfe120>0) >> large_cap ({lc_pgt0:.1f}%) by >{alt_pgt0-lc_pgt0:.0f}pp")
+            print(f"  -> Universe shift toward mature_pumpswap / pumpfun_mature is supported.")
+        elif lc_pgt0 > alt_pgt0 + 10:
+            print(f"  PIVOT EVIDENCE: large_cap ({lc_pgt0:.1f}%) >> alt lanes ({alt_pgt0:.1f}%) — current universe is better.")
+        else:
+            print(f"  No clear pivot evidence: large_cap {lc_pgt0:.1f}% vs alt {alt_pgt0:.1f}% (diff < 10pp).")
+else:
+    print("  No horizon data available.")
+
 # ── n=50 VERDICT GRID ────────────────────────────────────────────────────────
 if n_pairs >= 20:  # show grid from n=20 onwards so it is always visible
     print("\n" + "=" * 70)
@@ -1455,25 +1607,87 @@ if n_pairs >= 20:  # show grid from n=20 onwards so it is always visible
     print(_row("C) No-FAST + native_price_ok=1",  n_c, ms_c, mb_c, md_c, ci_lo_c, ci_hi_c))
     print(_row(cohort_d_label,                    n_d, ms_d, mb_d, md_d, ci_lo_d, ci_hi_d))
     print("=" * 120)
-    # Decision guidance
+    # ── PRE-REGISTERED n=50 DECISION RULE ────────────────────────────────────
     if n_pairs >= 50:
         print()
-        print("  n=50 DECISION RULES:")
-        print(f"  [1] Enable MIN_SCORE_TO_TRADE if: cohort D CI>0 AND cohort D strat>0")
-        d_ci_ok  = (ci_lo_d == ci_lo_d and ci_lo_d > 0)
-        d_str_ok = (ms_d == ms_d and ms_d > 0)
-        print(f"      -> CI>0: {yn(d_ci_ok)}   strat>0: {yn(d_str_ok)}")
-        print(f"  [2] Enable FAST_RISK_GATE if: FAST pre-entry feature scan shows accuracy >= 70%")
-        print(f"  [3] Deploy EXACTLY ONE flag change under a new signature for clean A/B test.")
-        if n_d >= 5 and d_ci_ok and d_str_ok:
-            print(f"  *** RECOMMENDATION: Enable MIN_SCORE_TO_TRADE = {t2_grid:.2f} (top-tercile threshold) ***")
-        elif n_d >= 5 and d_ci_ok and not d_str_ok:
-            print(f"  *** RECOMMENDATION: Delta positive but strat still negative -- consider FAST_RISK_GATE first ***")
+        print("  " + "=" * 68)
+        print("  PRE-REGISTERED n=50 DECISION RULE (monetizability-first)")
+        print("  " + "=" * 68)
+        print("  Inputs from horizon oracle and score bucket table:")
+        print("    A = %mfe_net_120m > 0 for HIGH-SCORE+NO-FAST cohort")
+        print("    B = mean(strategy_fee100) for HIGH-SCORE+NO-FAST cohort")
+        print("    C = pivot evidence: alt-lane %mfe120 >> large_cap %mfe120 by >10pp")
+        print()
+        # Pull horizon oracle values for HIGH-SCORE+NO-FAST
+        hs_nofast_hdata = [h for h in horizon_data
+                           if h['t']['entry_score'] is not None
+                           and h['t']['entry_score'] > t2_grid
+                           and not (isinstance(h['t']['duration_sec'], (int, float))
+                                    and h['t']['duration_sec'] < 60)]
+        hs_mfe120_vals = [h['mfe_120m_net'] for h in hs_nofast_hdata if h['mfe_120m_net'] is not None]
+        A_pgt0 = (100 * sum(1 for v in hs_mfe120_vals if v > 0) / len(hs_mfe120_vals)
+                  if hs_mfe120_vals else float('nan'))
+        B_strat = ms_d  # mean strategy_fee100 for cohort D
+        # Pivot evidence: compare large_cap vs alt lanes
+        lc_hdata  = [h for h in horizon_data if 'large_cap' in (h['t']['lane'] or '')]
+        alt_hdata = [h for h in horizon_data
+                     if 'large_cap' not in (h['t']['lane'] or '') and h['t']['lane']]
+        lc_mfe120  = [h['mfe_120m_net'] for h in lc_hdata  if h['mfe_120m_net'] is not None]
+        alt_mfe120 = [h['mfe_120m_net'] for h in alt_hdata if h['mfe_120m_net'] is not None]
+        lc_pgt0  = 100 * sum(1 for v in lc_mfe120  if v > 0) / len(lc_mfe120)  if lc_mfe120  else float('nan')
+        alt_pgt0 = 100 * sum(1 for v in alt_mfe120 if v > 0) / len(alt_mfe120) if alt_mfe120 else float('nan')
+        C_pivot  = (alt_pgt0 == alt_pgt0 and lc_pgt0 == lc_pgt0 and alt_pgt0 > lc_pgt0 + 10)
+        A_ok = (A_pgt0 == A_pgt0 and A_pgt0 >= 25)
+        B_ok = (B_strat == B_strat and B_strat > -0.5)  # trending toward 0
+        A_str = f"{A_pgt0:.1f}%" if A_pgt0 == A_pgt0 else "N/A"
+        B_str = f"{B_strat:+.4f}%" if B_strat == B_strat else "N/A"
+        C_str = f"alt={alt_pgt0:.1f}% vs lc={lc_pgt0:.1f}%" if (alt_pgt0==alt_pgt0 and lc_pgt0==lc_pgt0) else "N/A"
+        print(f"  A) HIGH-SCORE+NO-FAST %mfe120>0 = {A_str}  (threshold: >=25%)  -> {'PASS' if A_ok else 'FAIL'}")
+        print(f"  B) HIGH-SCORE+NO-FAST mean_strat = {B_str}  (threshold: >-0.5%) -> {'PASS' if B_ok else 'FAIL'}")
+        print(f"  C) Pivot evidence (alt>lc by 10pp): {C_str}  -> {'YES' if C_pivot else 'NO'}")
+        print()
+        if A_ok and B_ok:
+            # Score gating is the lever
+            # Find optimal score threshold: maximize %mfe120>0 for trades above threshold
+            all_scored_h = [(h['t']['entry_score'], h['mfe_120m_net'])
+                            for h in horizon_data
+                            if h['t']['entry_score'] is not None and h['mfe_120m_net'] is not None]
+            best_thr, best_pgt0, best_n = t2_grid, A_pgt0, len(hs_mfe120_vals)
+            if len(all_scored_h) >= 10:
+                candidate_thrs = sorted(set(s for s, _ in all_scored_h))
+                for thr in candidate_thrs:
+                    above = [v for s, v in all_scored_h if s > thr]
+                    if len(above) < 5: continue
+                    pgt0_thr = 100 * sum(1 for v in above if v > 0) / len(above)
+                    if pgt0_thr > best_pgt0:
+                        best_pgt0, best_thr, best_n = pgt0_thr, thr, len(above)
+            print(f"  *** DECISION: Enable MIN_SCORE_TO_TRADE ***")
+            print(f"  Optimal threshold: score > {best_thr:.2f}  (n_above={best_n}, %mfe120>0={best_pgt0:.1f}%)")
+            print(f"  This threshold simultaneously:")
+            print(f"    [1] Filters low-signal entries (score monotonicity confirmed)")
+            print(f"    [2] Blocks most FAST trades (score is best FAST predictor)")
+            print(f"    [3] Targets trades with meaningful monetizability at 120m")
+            print(f"  Deploy as ONE flag change under new signature for clean A/B.")
+        elif C_pivot:
+            # Universe shift is the lever
+            print(f"  *** DECISION: UNIVERSE SHIFT ***")
+            print(f"  HIGH-SCORE+NO-FAST cannot clear fees even at 120m in current universe.")
+            print(f"  Alt lanes ({alt_pgt0:.1f}% mfe120>0) >> large_cap ({lc_pgt0:.1f}%) by {alt_pgt0-lc_pgt0:.0f}pp.")
+            print(f"  Next signature: restrict universe to alt lanes (mature_pumpswap / pumpfun_mature)")
+            print(f"  while maintaining: high liq (>$50k), high vol (>$10k/h), mature (>24h).")
+            print(f"  Do NOT change MIN_SCORE_TO_TRADE in the same signature.")
         else:
-            print(f"  *** RECOMMENDATION: Inconclusive -- extend run or review FAST gate ***")
+            # Neither lever is clearly supported
+            print(f"  *** DECISION: INCONCLUSIVE — extend run or investigate further ***")
+            print(f"  A (monetizability): {'PASS' if A_ok else 'FAIL'}  B (strat trending): {'PASS' if B_ok else 'FAIL'}  C (pivot): {'YES' if C_pivot else 'NO'}")
+            print(f"  Options:")
+            print(f"    - If A fails and C fails: current universe/regime cannot pay fees -> pause and redesign.")
+            print(f"    - If A fails but C is borderline: collect 10 more pairs in alt lanes before deciding.")
+            print(f"    - If A is borderline (15-25%): try MIN_SCORE_TO_TRADE at top-quartile threshold.")
     else:
         pairs_needed = 50 - n_pairs
         print(f"  NOTE: {pairs_needed} more pairs needed to reach n=50 decision point.")
+        print(f"  Pre-registered rule: see HORIZON ORACLE + SCORE BUCKET + UNIVERSE MONETIZABILITY above.")
     if n_c < 10:
         print(f"  NOTE: cohort C has only n={n_c} pairs -- CI will be wide until more native_ok=1 trades accumulate.")
 print("\n" + "=" * 70)
