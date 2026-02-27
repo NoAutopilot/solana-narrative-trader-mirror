@@ -8,13 +8,16 @@ v1.19 additions (2026-02-26):
     baseline (if still open) is immediately closed with exit_reason_effective=
     'forced_pair_close'. forced_close=1 stored in DB. Baseline's own exit_reason
     is preserved; effective reason used in report display.
-  - Price sanity check (corrected): native-to-native comparison at open.
+  - Price sanity check (robust): native-to-native comparison at open.
     dex_price_native (SOL/token from DexScreener priceNative) vs
-    jup_exec_price_native = (inAmount_lamports/1e9) / (outAmount_raw/10^decimals_est).
+    jup_exec_price_native = (inAmount_lamports/1e9) / (outAmount_raw/10^decimals).
+    Decimals from get_mint_decimals(): Jupiter Tokens V2 API -> RPC getTokenSupply fallback.
+    Amounts cast to int (Jupiter returns strings). Decimal math (no float drift).
     jup_exec_vs_dex_pct = jup_exec_price_native/dex_price_native - 1.
     price_mismatch=1 if |jup_exec_vs_dex_pct| > 2% AND lane=large_cap_ray.
     Route identity (label, ammKey, contextSlot) logged on mismatch.
-    entry_jup_implied_price column now stores jup_exec_price_native (SOL/token).
+    If decimals unavailable: skip mismatch flag, keep trading.
+    entry_jup_implied_price column stores jup_exec_price_native (SOL/token).
 
 v1.18 additions (2026-02-26):
   - MFE/MAE correctness: _mfe_mae now stores entry_price, max_price_seen, min_price_seen
@@ -1024,6 +1027,57 @@ def _check_jup_health():
         logger.warning(f"JUP_HEALTH: ERROR {e} — Jupiter unavailable.")
 
 
+# ── Mint decimals cache + resolver (v1.19 fix) ──────────────────────────────
+# Used by the native-to-native price mismatch check to avoid inferring decimals
+# from the Dex price ratio (which is imprecise for tokens with unusual decimals).
+MINT_DECIMALS_CACHE: dict[str, int] = {}
+
+def get_mint_decimals(mint: str) -> int | None:
+    """Return token decimals for `mint`.
+    1) Cache hit.
+    2) Jupiter Tokens API V2 (already keyed — fast, no extra cost).
+    3) Solana public RPC getTokenSupply fallback.
+    Returns None if both sources fail; caller must skip mismatch classification.
+    """
+    if mint in MINT_DECIMALS_CACHE:
+        return MINT_DECIMALS_CACHE[mint]
+
+    # Option A: Jupiter Tokens API V2
+    try:
+        r = requests.get(
+            f"{JUPITER_BASE_URL}/tokens/v1/{mint}",
+            headers={"x-api-key": JUPITER_API_KEY},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            decimals = int(r.json().get("decimals", -1))
+            if decimals >= 0:
+                MINT_DECIMALS_CACHE[mint] = decimals
+                return decimals
+    except Exception:
+        pass
+
+    # Option B: Solana public RPC getTokenSupply
+    try:
+        rpc_url = "https://api.mainnet-beta.solana.com"
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTokenSupply",
+            "params": [mint],
+        }
+        r = requests.post(rpc_url, json=payload, timeout=5)
+        if r.status_code == 200:
+            result = r.json().get("result", {}) or {}
+            decimals = int((result.get("value") or {}).get("decimals", -1))
+            if decimals >= 0:
+                MINT_DECIMALS_CACHE[mint] = decimals
+                return decimals
+    except Exception:
+        pass
+
+    return None
+
+
 def get_jupiter_rt_estimate(
     mint: str,
     liq_base: float = 0,
@@ -1600,39 +1654,50 @@ def open_trade(strategy: str, row: dict, baseline_trigger_id: str | None = None,
     if jup_rt > FRICTION_GATE_MAX_RT:
         logger.info(f"SKIP {strategy} {mint[:8]}: Jupiter RT {jup_rt*100:.2f}% > gate {FRICTION_GATE_MAX_RT*100:.1f}%")
         return None
-    # v1.19 (corrected): native-to-native price mismatch check
-    # Compare DexScreener priceNative (SOL per token) vs Jupiter execution priceNative.
-    # Jupiter exec price: (inAmount_lamports / 1e9) / (outAmount_raw / 10^decimals)
-    # We infer decimals from the ratio: decimals = round(log10(outAmount / (inAmount/1e9) / dex_price_native))
-    # This avoids any extra API call and is self-consistent with the quote.
-    dex_price_native = row.get("price_native") or 0  # SOL per token from DexScreener
+    # v1.19 (robust): native-to-native price mismatch check
+    # Uses real mint decimals (Jupiter Tokens V2 + RPC fallback) instead of
+    # inferring from the Dex price ratio. Amounts cast to int (Jupiter returns strings).
+    # Decimal math used to avoid float drift on very small/large token prices.
+    from decimal import Decimal
+    dex_price_native  = float(row.get("price_native") or 0.0)  # SOL per token from DexScreener
     jup_exec_price_native = None
     jup_exec_vs_dex_pct   = None
     price_mismatch_flag   = 0
     jup_implied_price     = None  # kept for DB column (now stores jup_exec_price_native)
     if jup_quote_data is not None and dex_price_native > 0:
-        in_sol  = jup_quote_data["inAmount"] / 1e9
-        out_raw = jup_quote_data["outAmount"]
-        if out_raw > 0 and in_sol > 0:
-            import math
-            # Infer token decimals from the ratio of raw outAmount to expected token amount
-            raw_ratio = out_raw / in_sol  # raw units per SOL
-            dex_units_per_sol = 1.0 / dex_price_native  # expected token units per SOL
-            decimals_est = round(math.log10(raw_ratio / dex_units_per_sol)) if dex_units_per_sol > 0 else 6
-            decimals_est = max(0, min(decimals_est, 18))  # clamp to sane range
-            jup_exec_price_native = in_sol / (out_raw / (10 ** decimals_est))  # SOL per token
-            jup_exec_vs_dex_pct   = (jup_exec_price_native / dex_price_native - 1.0)
-            jup_implied_price      = jup_exec_price_native  # store in existing DB column
-            # Flag mismatch only for large_cap_ray (most liquid; clearest signal)
-            if lane == "large_cap_ray" and abs(jup_exec_vs_dex_pct) > 0.02:
-                price_mismatch_flag = 1
-                logger.info(
-                    f"PRICE_MISMATCH {strategy} {row.get('token_symbol','?')} ({mint[:8]}): "
-                    f"dex_native={dex_price_native:.8f} jup_exec_native={jup_exec_price_native:.8f} "
-                    f"delta={jup_exec_vs_dex_pct*100:+.2f}% "
-                    f"route={jup_quote_data['route_label']} amm={jup_quote_data['amm_key'][:12]} "
-                    f"slot={jup_quote_data['context_slot']}"
-                )
+        try:
+            in_lamports = int(jup_quote_data["inAmount"])   # Jupiter returns strings
+            out_raw     = int(jup_quote_data["outAmount"])  # Jupiter returns strings
+        except (KeyError, ValueError, TypeError):
+            in_lamports = 0
+            out_raw = 0
+        if in_lamports > 0 and out_raw > 0:
+            decimals = get_mint_decimals(mint)
+            if decimals is not None:
+                in_sol     = Decimal(in_lamports) / Decimal(10**9)
+                out_tokens = Decimal(out_raw) / Decimal(10**decimals)
+                if out_tokens > 0:
+                    jup_exec_price_native = float(in_sol / out_tokens)  # SOL per token
+                    jup_exec_vs_dex_pct   = (jup_exec_price_native / dex_price_native) - 1.0
+                    jup_implied_price     = jup_exec_price_native
+                    # Flag mismatch only for large_cap_ray (most liquid; clearest signal)
+                    if lane == "large_cap_ray" and abs(jup_exec_vs_dex_pct) > 0.02:
+                        price_mismatch_flag = 1
+                        route_plan = jup_quote_data.get("routePlan") or []
+                        swap0  = (route_plan[0].get("swapInfo") if route_plan else {}) or {}
+                        label  = swap0.get("label", jup_quote_data.get("route_label", "?"))
+                        amm_k  = swap0.get("ammKey",  jup_quote_data.get("amm_key",   "?"))
+                        slot   = jup_quote_data.get("contextSlot", jup_quote_data.get("context_slot", "?"))
+                        logger.info(
+                            f"PRICE_MISMATCH {strategy} {row.get('token_symbol','?')} ({mint[:8]}): "
+                            f"dex_native={dex_price_native:.10f} jup_exec_native={jup_exec_price_native:.10f} "
+                            f"delta={jup_exec_vs_dex_pct*100:+.2f}% dec={decimals} "
+                            f"label={label} amm={str(amm_k)[:12]} slot={slot}"
+                        )
+            else:
+                # Decimals unknown — skip mismatch classification but keep trading
+                price_mismatch_flag = 0
+                jup_implied_price   = None
 
     liq_b = row.get("liq_base") or 0
     liq_q = row.get("liq_quote_sol") or 0
