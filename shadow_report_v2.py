@@ -819,6 +819,40 @@ if mode == "decision":
     last6h_nofast = [p for p in nofast_pairs
                      if p["s_entered"] and str(p["s_entered"]) >= cutoff_6h]
     _print_sensitivity("D) NO-FAST + LAST 6H", last6h_nofast)
+    # E) HIGH-SCORE + NO-FAST (top tercile by entry_score, strategy duration >= 60s)
+    pairs_with_score_e = [p for p in pairs if p["s_score"] is not None]
+    if len(pairs_with_score_e) >= 6:
+        scores_e = sorted(p["s_score"] for p in pairs_with_score_e)
+        t2_e = scores_e[2 * len(scores_e) // 3]  # top tercile threshold
+        high_nofast = [p for p in nofast_pairs
+                       if p["s_score"] is not None and p["s_score"] > t2_e]
+        print(f"  (E uses top-tercile threshold={t2_e:.4f}, "
+              f"n_high_all={sum(1 for p in pairs_with_score_e if p['s_score'] > t2_e)}")
+        _print_sensitivity("E) HIGH-SCORE + NO-FAST", high_nofast)
+    else:
+        print("  E) HIGH-SCORE + NO-FAST: insufficient pairs for score tercile split.")
+    # ── FAST ATTRIBUTION (by token and by lane) ───────────────────────────────
+    if n_fast > 0:
+        print(f"\n" + "-" * 70)
+        print("FAST ATTRIBUTION")
+        print("-" * 70)
+        from collections import Counter
+        tok_total   = Counter(p["s_token"] for p in pairs)
+        tok_fast    = Counter(p["s_token"] for p in fast_pairs)
+        lane_total  = Counter(p["s_lane"]  for p in pairs)
+        lane_fast   = Counter(p["s_lane"]  for p in fast_pairs)
+        print("  By token:")
+        print(f"    {'token':<12} {'n_fast':>7} {'n_total':>8} {'fast_rate':>10}")
+        for tok in sorted(tok_total, key=lambda t: -tok_fast.get(t, 0)):
+            nf = tok_fast.get(tok, 0)
+            nt = tok_total[tok]
+            print(f"    {tok:<12} {nf:>7} {nt:>8} {nf/nt*100:>9.1f}%")
+        print("  By lane:")
+        print(f"    {'lane':<20} {'n_fast':>7} {'n_total':>8} {'fast_rate':>10}")
+        for lane in sorted(lane_total, key=lambda l: -lane_fast.get(l, 0)):
+            nf = lane_fast.get(lane, 0)
+            nt = lane_total[lane]
+            print(f"    {lane:<20} {nf:>7} {nt:>8} {nf/nt*100:>9.1f}%")
 
     # ── FAST PAIRS DETAIL TABLE ───────────────────────────────────────────────
     if n_fast > 0:

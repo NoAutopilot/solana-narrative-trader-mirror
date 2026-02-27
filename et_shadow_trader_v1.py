@@ -250,7 +250,14 @@ ANTI_CHASE_FILTER_ENABLED   = True
 # Current run (sig=01f9bdf7d0385d0d) keeps this OFF until n_pairs=50.
 FAST_RISK_GATE_ENABLED      = False
 FAST_BLACKLIST_DURATION_H   = 12   # hours a mint stays blacklisted after FAST SL
-
+# ── MIN_SCORE_TO_TRADE (v1.19, feature-flag, default None = OFF) ─────────────────
+# When set to a float, a tick is skipped entirely unless the top candidate's
+# pullback_score_rank score >= this threshold.
+# Goal: filter out low-confidence setups and focus capital on high-score entries.
+# Pre-registered for post-n=50 experiment. Deploy under a NEW signature.
+# Current run (sig=01f9bdf7d0385d0d) keeps this None until n_pairs=50.
+# Example: MIN_SCORE_TO_TRADE = 5.0  (top ~33% of observed scores)
+MIN_SCORE_TO_TRADE          = None   # float or None; None = OFF (no score filter)
 # P3: pullback_score_rank weights
 # score = W_DEPTH*z_depth + W_VOL_ACCEL*vol_accel + W_BUY_RATIO*(buy_ratio-0.5) - W_PENALTY*risk_flags
 PSR_W_DEPTH                 = 1.0
@@ -1676,6 +1683,17 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
         ok, blk = _check_tradeable(b_row) if b_row else (True, None)
         return tok, sc, (None if ok else blk)
 
+    # ── MIN_SCORE_TO_TRADE gate (feature-flag, default None = OFF) ─────────────
+    if MIN_SCORE_TO_TRADE is not None and best_score < MIN_SCORE_TO_TRADE:
+        logger.info(
+            f"RANK {strategy}: MIN_SCORE_TO_TRADE gate — "
+            f"top_score={best_score:.4f} < threshold={MIN_SCORE_TO_TRADE:.4f}, skipping tick."
+        )
+        _bt, _bs, _bb = _best_diag_for_best(best, best_score)
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False,
+                           f"min_score_gate:{best_score:.4f}<{MIN_SCORE_TO_TRADE:.4f}",
+                           rej_counts, best_token=_bt, best_score=_bs, best_block_reason=_bb)
+        return None
     # ── Check position cap for strategy (baseline always exempt) ──────────────
     if not passes_position_cap(strategy):
         # v1.14: show which trade is holding the cap slot
