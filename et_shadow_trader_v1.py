@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.19
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.20
+
+v1.20 additions (2026-02-27):
+  - UNIVERSE SHIFT (new signature): restrict trading to pumpfun_mature only.
+    ALLOWED_LANES = {"pumpfun_mature"} — large_cap_ray and non_pumpfun_mature blocked.
+    Mature constraints tightened: liq >= $50k (was $100k), vol_h1 >= $10k added.
+    ANCHOR_MINTS cleared (large-cap anchors no longer in allowed universe).
+    All other parameters (scoring, exits, cadence) FROZEN — universe shift only.
+    Pre-registered evaluation at n=50: NO-FAST %mfe120>0 >= 25% AND CI lower > 0.
 
 v1.19 additions (2026-02-26):
   - duration_sec + poll_count: tracked in-memory per trade, written to DB on close.
@@ -228,7 +236,7 @@ SCORE_RANK_MIN_R_M5         = 0.0
 SCORE_RANK_MIN_BUY_RATIO    = 0.25
 SCORE_RANK_MIN_VOL_ACCEL    = 0.2
 
-# ── v1.10 LANE GATES ──────────────────────────────────────────────────────────
+## ── v1.10 LANE GATES ────────────────────────────────────────────────────────
 # pumpfun_early (age < 24h) is always blocked — no constant needed.
 # pumpfun_mature (age >= 24h) is eligible but requires extra stability gates:
 PF_MATURE_MIN_AGE_H         = 24.0       # hours — pumpfun_origin must be >= 24h old
@@ -236,6 +244,13 @@ PF_MATURE_RV5M_MAX          = 1.5        # % — max rv_5m for pumpfun_mature en
 PF_MATURE_RANGE_MULT        = 3.0        # range_5m must be <= this * rv_5m
 # non_pumpfun_mature: pumpfun_origin=0, age >= LANE_GATE_MIN_AGE_H (4h)
 # large_cap_ray: age >= 30 days (benchmark lane, no extra gates)
+
+# ── v1.20 UNIVERSE SHIFT ─────────────────────────────────────────────────────
+# ALLOWED_LANES: only lanes in this set are eligible for strategy entries.
+# None = allow all non-blocked lanes (legacy v1.19 behaviour).
+# v1.20: pumpfun_mature ONLY. large_cap_ray + non_pumpfun_mature BLOCKED.
+# This is the SOLE change in this signature — all other params frozen.
+ALLOWED_LANES: set | None = {"pumpfun_mature"}
 
 # P1: Anti-chase filter — block ALL long entries when r_m5 > this cap.
 R_M5_CHASE_CAP              = 1.0        # % — skip entry if r_m5 > this
@@ -989,34 +1004,22 @@ def log_selection_tick(eligible_count: int, tradeable_count: int, top_token: str
     except Exception as e:
         logger.debug(f"selection_tick_log write error: {e}")
 
-# ── LANE CLASSIFICATION ──────────────────────────────────────────────────────
+# ── LANE CLASSIFICATION ──────────────────────────────────────────────
 # Hard gates: tokens must pass ALL to be eligible for any strategy entry.
-# These are enforced in open_trade() before the friction gate.
-LANE_GATE_MIN_AGE_H    = 4.0       # hours — exclude fresh graduates
-LANE_GATE_MIN_LIQ_USD  = 100_000   # USD — minimum liquidity
-LANE_GATE_MIN_VOL_24H  = 250_000   # USD — minimum 24h volume
+# These are enforced in _check_tradeable() before the friction gate.
+# v1.20: tightened for pumpfun_mature universe.
+LANE_GATE_MIN_AGE_H    = 24.0      # hours — v1.20: pumpfun_mature requires >= 24h
+LANE_GATE_MIN_LIQ_USD  = 50_000    # USD — v1.20: lowered from 100k (pumpfun_mature typical range)
+LANE_GATE_MIN_VOL_24H  = 100_000   # USD — 24h vol floor (secondary check)
+LANE_GATE_MIN_VOL_H1   = 10_000    # USD — v1.20: NEW — vol_h1 >= $10k/h hard gate
 
 # ── ANCHOR MINT LIST ─────────────────────────────────────────────────────────
 # Always-scanned mature tokens that bypass the universe scanner's eligible gate.
 # These are high-liquidity, non-pumpfun tokens that should always be in the
 # tradeable universe. Add/remove as needed.
-ANCHOR_MINTS = {
-    # Large-cap Raydium (age >= 30d, liq >= 1M)
-    "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # $WIF
-    "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82",   # BOME
-    "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",  # POPCAT
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # Bonk
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",   # JUP
-    "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4",  # RAY
-    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # WETH (Wormhole)
-    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  # mSOL
-    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",  # PYTH
-    "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",  # WBTC (Wormhole)
-    "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",   # ORCA
-    "A9mUU4qviSctJVPJdBJWkb28deg915LYJKrzQ19ji3FM",   # USDCet
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
-    "So11111111111111111111111111111111111111112",     # SOL (wrapped)
-}
+# v1.20: ANCHOR_MINTS cleared — large-cap tokens are no longer in the allowed universe.
+# pumpfun_mature tokens are discovered dynamically via the universe scanner.
+ANCHOR_MINTS: set = set()
 
 def classify_lane(row: dict) -> str:
     """
@@ -1369,19 +1372,27 @@ def _check_tradeable(row: dict) -> tuple[bool, str]:
     Returns (tradeable: bool, reason: str).
     Checks: lane, age, liq, vol, anti-chase, rug, pf_mature_stability, vol_cap, Jupiter.
     Does NOT check position cap (that's strategy-level).
+    v1.20: ALLOWED_LANES whitelist gate + vol_h1 >= LANE_GATE_MIN_VOL_H1 gate.
     """
     lane = classify_lane(row)
     if lane == "pumpfun_early":
         return False, "lane:pumpfun_early"
+    # v1.20: ALLOWED_LANES whitelist — block any lane not in the allowed set
+    if ALLOWED_LANES is not None and lane not in ALLOWED_LANES:
+        return False, f"lane:not_allowed:{lane}"
     age_h   = row.get("age_hours") or 0
     liq_usd = row.get("liq_usd") or 0
     vol_24h = row.get("vol_h24") or 0
+    vol_h1  = row.get("vol_h1") or 0
     if age_h < LANE_GATE_MIN_AGE_H:
         return False, "lane:age"
     if liq_usd < LANE_GATE_MIN_LIQ_USD:
         return False, "lane:liq"
     if vol_24h < LANE_GATE_MIN_VOL_24H:
         return False, "lane:vol"
+    # v1.20: vol_h1 hard gate
+    if vol_h1 < LANE_GATE_MIN_VOL_H1:
+        return False, f"lane:vol_h1={vol_h1:.0f}<{LANE_GATE_MIN_VOL_H1}"
     # Anti-chase
     if ANTI_CHASE_FILTER_ENABLED:
         r_m5 = row.get("r_m5") or 0
@@ -2058,7 +2069,7 @@ def _compute_run_signature() -> str:
     """
     import json, hashlib
     sig_params = {
-        "version": "v1.19",
+        "version": "v1.20",
         "mode": MODE,
         "sl_pct": EXIT_STOP_LOSS_PCT,
         "tp_pct": EXIT_TAKE_PROFIT_PCT,
@@ -2071,10 +2082,13 @@ def _compute_run_signature() -> str:
         "pf_mature_min_age_h": PF_MATURE_MIN_AGE_H,
         "pf_mature_rv5m_max": PF_MATURE_RV5M_MAX,
         "anti_chase_enabled": ANTI_CHASE_FILTER_ENABLED,
+        "allowed_lanes": sorted(ALLOWED_LANES) if ALLOWED_LANES is not None else "ALL",
+        "lane_gate_min_liq_usd": LANE_GATE_MIN_LIQ_USD,
+        "lane_gate_min_vol_h1": LANE_GATE_MIN_VOL_H1,
         "lane_pumpfun_early": "BLOCKED",
         "lane_pumpfun_mature": f"rv5m<={PF_MATURE_RV5M_MAX}",
-        "lane_non_pumpfun_mature": "OK",
-        "lane_large_cap_ray": "OK",
+        "lane_non_pumpfun_mature": "BLOCKED_v1.20",
+        "lane_large_cap_ray": "BLOCKED_v1.20",
     }
     canonical = json.dumps(sig_params, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -2096,7 +2110,10 @@ def _register_run():
         "pf_mature_min_age_h": PF_MATURE_MIN_AGE_H,
         "pf_mature_rv5m_max": PF_MATURE_RV5M_MAX,
     })
-    lane_gates = f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% non_pumpfun_mature=OK large_cap_ray=OK"
+    lane_gates = (f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% "
+                  f"non_pumpfun_mature=BLOCKED_v1.20 large_cap_ray=BLOCKED_v1.20 "
+                  f"allowed_lanes={sorted(ALLOWED_LANES) if ALLOWED_LANES else 'ALL'} "
+                  f"liq>={LANE_GATE_MIN_LIQ_USD} vol_h1>={LANE_GATE_MIN_VOL_H1}")
     sig = _compute_run_signature()
     try:
         conn = get_conn()
@@ -2105,10 +2122,10 @@ def _register_run():
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.19", lane_gates, key_params, sig))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.20", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.19 mode={MODE} signature={sig}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.20 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 

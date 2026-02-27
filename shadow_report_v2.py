@@ -852,7 +852,81 @@ if mode == "decision":
         print(f"{indent}  95% CI        : [{ci_lo:+.4f}%, {ci_hi:+.4f}%]")
         print(f"{indent}  VERDICT       : {verdict}")
 
-    # ── 4-way sensitivity summaries ───────────────────────────────────────────
+    # ── LANE ELIGIBILITY DIAGNOSTICS (v1.20) ──────────────────────────────────────────────────
+    print(f"\n" + "-" * 70)
+    print("LANE ELIGIBILITY DIAGNOSTICS")
+    print("-" * 70)
+    print("  Source: selection_tick_log (one row per 15-min scan cycle)")
+    print("  eligible_count = tokens passing lane+age+liq+vol gates")
+    print("  tradeable_count = tokens also passing rug+stability+Jupiter gates")
+    print("  opened = trade was opened this tick")
+    print()
+    has_stl = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='selection_tick_log'"
+    ).fetchone()[0]
+    if not has_stl:
+        print("  selection_tick_log table not found (requires v1.12+ harness).")
+    else:
+        stl_rows = conn.execute(
+            f"SELECT logged_at, eligible_count, tradeable_count, opened_trade_bool, "
+            f"reason_no_trade, top_token, top_score, "
+            f"rej_lane_age, rej_lane_liq, rej_lane_vol, rej_lane_pf_early "
+            f"FROM selection_tick_log "
+            f"WHERE run_id IN {in_clause(INCLUDED_RUN_IDS)} "
+            f"ORDER BY logged_at DESC LIMIT 200",
+            INCLUDED_RUN_IDS
+        ).fetchall()
+        n_ticks = len(stl_rows)
+        if n_ticks == 0:
+            print("  No selection_tick_log rows for this run yet.")
+        else:
+            n_opened   = sum(1 for r in stl_rows if r["opened_trade_bool"])
+            n_stall    = sum(1 for r in stl_rows if not r["opened_trade_bool"])
+            avg_elig   = sum(r["eligible_count"] or 0 for r in stl_rows) / n_ticks
+            avg_trade  = sum(r["tradeable_count"] or 0 for r in stl_rows) / n_ticks
+            print(f"  Ticks analysed (last 200): {n_ticks}")
+            print(f"  Ticks with trade opened  : {n_opened} ({100*n_opened/n_ticks:.1f}%)")
+            print(f"  Ticks stalled (no trade) : {n_stall} ({100*n_stall/n_ticks:.1f}%)")
+            print(f"  avg eligible_count/tick  : {avg_elig:.1f}")
+            print(f"  avg tradeable_count/tick : {avg_trade:.1f}")
+            # Stall reason breakdown
+            stall_reasons = {}
+            for r in stl_rows:
+                if not r["opened_trade_bool"]:
+                    reason = r["reason_no_trade"] or "unknown"
+                    stall_reasons[reason] = stall_reasons.get(reason, 0) + 1
+            if stall_reasons:
+                print()
+                print(f"  Stall reason breakdown:")
+                for reason, cnt in sorted(stall_reasons.items(), key=lambda x: -x[1]):
+                    print(f"    {reason:<40} {cnt:>4} ticks ({100*cnt/n_ticks:.1f}%)")
+            # Lane rejection breakdown (last 50 ticks)
+            recent = stl_rows[:50]
+            rej_age = sum(r["rej_lane_age"] or 0 for r in recent)
+            rej_liq = sum(r["rej_lane_liq"] or 0 for r in recent)
+            rej_vol = sum(r["rej_lane_vol"] or 0 for r in recent)
+            rej_pfe = sum(r["rej_lane_pf_early"] or 0 for r in recent)
+            if any([rej_age, rej_liq, rej_vol, rej_pfe]):
+                print()
+                print(f"  Lane rejection counts (last {len(recent)} ticks):")
+                print(f"    rej_lane_age={rej_age}  rej_lane_liq={rej_liq}  rej_lane_vol={rej_vol}  rej_lane_pf_early={rej_pfe}")
+            # Recent ticks table (last 10)
+            print()
+            print(f"  Recent ticks (last 10):")
+            print(f"    {'logged_at':<20} {'elig':>5} {'trade':>6} {'opened':>7} {'top_token':<14} {'top_score':>10} {'reason':<35}")
+            print(f"    {'-'*100}")
+            for r in stl_rows[:10]:
+                la   = (r["logged_at"] or "")[:19]
+                el   = r["eligible_count"] or 0
+                tr   = r["tradeable_count"] or 0
+                op   = "YES" if r["opened_trade_bool"] else "NO"
+                tok  = r["top_token"] or ""
+                sc   = r["top_score"]
+                sc_s = f"{sc:.3f}" if sc is not None else "N/A"
+                rsn  = (r["reason_no_trade"] or "")[:34]
+                print(f"    {la:<20} {el:>5} {tr:>6} {op:>7} {tok:<14} {sc_s:>10} {rsn:<35}")
+
+    # ── 4-way sensitivity summaries ──────────────────────────────────────────────────────
     print(f"\n" + "-" * 70)
     print("SENSITIVITY SUMMARIES")
     print("-" * 70)
@@ -1611,79 +1685,61 @@ if n_pairs >= 20:  # show grid from n=20 onwards so it is always visible
     if n_pairs >= 50:
         print()
         print("  " + "=" * 68)
-        print("  PRE-REGISTERED n=50 DECISION RULE (monetizability-first)")
+        print("  PRE-REGISTERED n=50 DECISION RULE (v1.20 universe-shift evaluation)")
         print("  " + "=" * 68)
-        print("  Inputs from horizon oracle and score bucket table:")
-        print("    A = %mfe_net_120m > 0 for HIGH-SCORE+NO-FAST cohort")
-        print("    B = mean(strategy_fee100) for HIGH-SCORE+NO-FAST cohort")
-        print("    C = pivot evidence: alt-lane %mfe120 >> large_cap %mfe120 by >10pp")
+        print("  Signature: v1.20 (pumpfun_mature ONLY, liq>=$50k, vol_h1>=$10k)")
+        print("  Inputs from horizon oracle and NO-FAST cohort:")
+        print("    A = %mfe_net_120m > 0 for NO-FAST cohort (threshold: >=25%)")
+        print("    B = CI lower bound for NO-FAST delta > 0")
+        print("    C = mean(strategy_fee100) for NO-FAST cohort (direction check)")
         print()
-        # Pull horizon oracle values for HIGH-SCORE+NO-FAST
-        hs_nofast_hdata = [h for h in horizon_data
-                           if h['t']['entry_score'] is not None
-                           and h['t']['entry_score'] > t2_grid
-                           and not (isinstance(h['t']['duration_sec'], (int, float))
-                                    and h['t']['duration_sec'] < 60)]
-        hs_mfe120_vals = [h['mfe_120m_net'] for h in hs_nofast_hdata if h['mfe_120m_net'] is not None]
-        A_pgt0 = (100 * sum(1 for v in hs_mfe120_vals if v > 0) / len(hs_mfe120_vals)
-                  if hs_mfe120_vals else float('nan'))
-        B_strat = ms_d  # mean strategy_fee100 for cohort D
-        # Pivot evidence: compare large_cap vs alt lanes
-        lc_hdata  = [h for h in horizon_data if 'large_cap' in (h['t']['lane'] or '')]
-        alt_hdata = [h for h in horizon_data
-                     if 'large_cap' not in (h['t']['lane'] or '') and h['t']['lane']]
-        lc_mfe120  = [h['mfe_120m_net'] for h in lc_hdata  if h['mfe_120m_net'] is not None]
-        alt_mfe120 = [h['mfe_120m_net'] for h in alt_hdata if h['mfe_120m_net'] is not None]
-        lc_pgt0  = 100 * sum(1 for v in lc_mfe120  if v > 0) / len(lc_mfe120)  if lc_mfe120  else float('nan')
-        alt_pgt0 = 100 * sum(1 for v in alt_mfe120 if v > 0) / len(alt_mfe120) if alt_mfe120 else float('nan')
-        C_pivot  = (alt_pgt0 == alt_pgt0 and lc_pgt0 == lc_pgt0 and alt_pgt0 > lc_pgt0 + 10)
-        A_ok = (A_pgt0 == A_pgt0 and A_pgt0 >= 25)
-        B_ok = (B_strat == B_strat and B_strat > -0.5)  # trending toward 0
+        # v1.20 evaluation: use NO-FAST cohort (B) from decision grid
+        # A = %mfe_net_120m > 0 for NO-FAST cohort
+        # B_ci = CI lower bound for NO-FAST delta
+        # C = mean(strategy_fee100) for NO-FAST cohort
+        nofast_hdata = [h for h in horizon_data
+                        if not (isinstance(h['t']['duration_sec'], (int, float))
+                                and h['t']['duration_sec'] < 60)]
+        nofast_mfe120_vals = [h['mfe_120m_net'] for h in nofast_hdata if h['mfe_120m_net'] is not None]
+        A_pgt0 = (100 * sum(1 for v in nofast_mfe120_vals if v > 0) / len(nofast_mfe120_vals)
+                  if nofast_mfe120_vals else float('nan'))
+        # B: CI lower bound for NO-FAST delta (from sensitivity block B)
+        nofast_deltas_v = [(p["s_fee100"] or 0.0)*100 - (p["b_fee100"] or 0.0)*100 for p in nofast_pairs]
+        ci_lo_nf, ci_hi_nf = bootstrap_ci(nofast_deltas_v) if len(nofast_deltas_v) >= 3 else (float('nan'), float('nan'))
+        # C: mean strategy_fee100 for NO-FAST cohort
+        C_strat = (sum((p["s_fee100"] or 0.0)*100 for p in nofast_pairs) / len(nofast_pairs)
+                   if nofast_pairs else float('nan'))
+        A_ok  = (A_pgt0 == A_pgt0 and A_pgt0 >= 25)
+        B_ok  = (ci_lo_nf == ci_lo_nf and ci_lo_nf > 0)
+        C_dir = (C_strat == C_strat and C_strat > -1.0)  # directional: trending toward 0
         A_str = f"{A_pgt0:.1f}%" if A_pgt0 == A_pgt0 else "N/A"
-        B_str = f"{B_strat:+.4f}%" if B_strat == B_strat else "N/A"
-        C_str = f"alt={alt_pgt0:.1f}% vs lc={lc_pgt0:.1f}%" if (alt_pgt0==alt_pgt0 and lc_pgt0==lc_pgt0) else "N/A"
-        print(f"  A) HIGH-SCORE+NO-FAST %mfe120>0 = {A_str}  (threshold: >=25%)  -> {'PASS' if A_ok else 'FAIL'}")
-        print(f"  B) HIGH-SCORE+NO-FAST mean_strat = {B_str}  (threshold: >-0.5%) -> {'PASS' if B_ok else 'FAIL'}")
-        print(f"  C) Pivot evidence (alt>lc by 10pp): {C_str}  -> {'YES' if C_pivot else 'NO'}")
+        B_str = f"[{ci_lo_nf:+.3f}%, {ci_hi_nf:+.3f}%]" if ci_lo_nf == ci_lo_nf else "N/A"
+        C_str = f"{C_strat:+.4f}%" if C_strat == C_strat else "N/A"
+        print(f"  A) NO-FAST %mfe120>0       = {A_str:<10}  (threshold: >=25%)  -> {'PASS' if A_ok else 'FAIL'}")
+        print(f"  B) NO-FAST delta CI lower  = {B_str:<20}  (threshold: >0)     -> {'PASS' if B_ok else 'FAIL'}")
+        print(f"  C) NO-FAST mean_strat_fee% = {C_str:<10}  (direction: >-1.0%) -> {'PASS' if C_dir else 'FAIL'}")
         print()
         if A_ok and B_ok:
-            # Score gating is the lever
-            # Find optimal score threshold: maximize %mfe120>0 for trades above threshold
-            all_scored_h = [(h['t']['entry_score'], h['mfe_120m_net'])
-                            for h in horizon_data
-                            if h['t']['entry_score'] is not None and h['mfe_120m_net'] is not None]
-            best_thr, best_pgt0, best_n = t2_grid, A_pgt0, len(hs_mfe120_vals)
-            if len(all_scored_h) >= 10:
-                candidate_thrs = sorted(set(s for s, _ in all_scored_h))
-                for thr in candidate_thrs:
-                    above = [v for s, v in all_scored_h if s > thr]
-                    if len(above) < 5: continue
-                    pgt0_thr = 100 * sum(1 for v in above if v > 0) / len(above)
-                    if pgt0_thr > best_pgt0:
-                        best_pgt0, best_thr, best_n = pgt0_thr, thr, len(above)
-            print(f"  *** DECISION: Enable MIN_SCORE_TO_TRADE ***")
-            print(f"  Optimal threshold: score > {best_thr:.2f}  (n_above={best_n}, %mfe120>0={best_pgt0:.1f}%)")
-            print(f"  This threshold simultaneously:")
-            print(f"    [1] Filters low-signal entries (score monotonicity confirmed)")
-            print(f"    [2] Blocks most FAST trades (score is best FAST predictor)")
-            print(f"    [3] Targets trades with meaningful monetizability at 120m")
-            print(f"  Deploy as ONE flag change under new signature for clean A/B.")
-        elif C_pivot:
-            # Universe shift is the lever
-            print(f"  *** DECISION: UNIVERSE SHIFT ***")
-            print(f"  HIGH-SCORE+NO-FAST cannot clear fees even at 120m in current universe.")
-            print(f"  Alt lanes ({alt_pgt0:.1f}% mfe120>0) >> large_cap ({lc_pgt0:.1f}%) by {alt_pgt0-lc_pgt0:.0f}pp.")
-            print(f"  Next signature: restrict universe to alt lanes (mature_pumpswap / pumpfun_mature)")
-            print(f"  while maintaining: high liq (>$50k), high vol (>$10k/h), mature (>24h).")
-            print(f"  Do NOT change MIN_SCORE_TO_TRADE in the same signature.")
+            # Universe shift is working: proceed to next single-lever iteration
+            print(f"  *** DECISION: PROCEED — universe shift is working ***")
+            print(f"  NO-FAST monetizability (A) and delta CI (B) both PASS.")
+            print(f"  Next lever: consider MIN_SCORE_TO_TRADE or horizon/hold extension.")
+            print(f"  Collect score bucket table above to identify optimal threshold.")
+            print(f"  Deploy as ONE flag change under a new signature.")
+        elif A_ok and not B_ok:
+            print(f"  *** DECISION: EXTEND RUN — monetizability OK but delta CI not yet positive ***")
+            print(f"  %mfe120>0 is passing ({A_str}) but delta CI still crosses zero.")
+            print(f"  Collect 10-20 more pairs before adding a new lever.")
+        elif not A_ok and C_dir:
+            print(f"  *** DECISION: INCONCLUSIVE — monetizability still low, but strat trending ***")
+            print(f"  %mfe120>0 = {A_str} (below 25% threshold). Extend run 20 more pairs.")
+            print(f"  If still <25% at n=70: universe cannot pay fees — stop and redesign.")
         else:
-            # Neither lever is clearly supported
-            print(f"  *** DECISION: INCONCLUSIVE — extend run or investigate further ***")
-            print(f"  A (monetizability): {'PASS' if A_ok else 'FAIL'}  B (strat trending): {'PASS' if B_ok else 'FAIL'}  C (pivot): {'YES' if C_pivot else 'NO'}")
-            print(f"  Options:")
-            print(f"    - If A fails and C fails: current universe/regime cannot pay fees -> pause and redesign.")
-            print(f"    - If A fails but C is borderline: collect 10 more pairs in alt lanes before deciding.")
-            print(f"    - If A is borderline (15-25%): try MIN_SCORE_TO_TRADE at top-quartile threshold.")
+            print(f"  *** DECISION: STOP — universe cannot pay fees ***")
+            print(f"  %mfe120>0 = {A_str} (below 25%). mean_strat = {C_str} (not trending to 0).")
+            print(f"  pumpfun_mature universe is also not monetizable at this fee floor.")
+            print(f"  Options: lower fee floor (smaller trade size), change exit logic,")
+            print(f"  or pivot to a fundamentally different regime/universe.")
     else:
         pairs_needed = 50 - n_pairs
         print(f"  NOTE: {pairs_needed} more pairs needed to reach n=50 decision point.")
