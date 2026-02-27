@@ -442,7 +442,12 @@ def init_tables():
             stall_example_reason TEXT,
             best_token TEXT,
             best_score REAL,
-            best_block_reason TEXT
+            best_block_reason TEXT,
+            whatif_no_pf_stability  INTEGER DEFAULT 0,
+            whatif_no_anti_chase    INTEGER DEFAULT 0,
+            whatif_no_pf_early      INTEGER DEFAULT 0,
+            whatif_no_lane_liq      INTEGER DEFAULT 0,
+            whatif_no_lane_vol      INTEGER DEFAULT 0
         )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_stl_at ON selection_tick_log(logged_at, run_id)")
@@ -463,9 +468,14 @@ def init_tables():
         ("rej_pf_stability",   "INTEGER DEFAULT 0"),
         ("stall_example_token",  "TEXT"),
         ("stall_example_reason", "TEXT"),
-        ("best_token",           "TEXT"),
-        ("best_score",           "REAL"),
-        ("best_block_reason",    "TEXT"),
+        ("best_token",                "TEXT"),
+        ("best_score",                "REAL"),
+        ("best_block_reason",         "TEXT"),
+        ("whatif_no_pf_stability",    "INTEGER DEFAULT 0"),
+        ("whatif_no_anti_chase",      "INTEGER DEFAULT 0"),
+        ("whatif_no_pf_early",        "INTEGER DEFAULT 0"),
+        ("whatif_no_lane_liq",        "INTEGER DEFAULT 0"),
+        ("whatif_no_lane_vol",        "INTEGER DEFAULT 0"),
     ]:
         if col not in stl_existing:
             try:
@@ -911,12 +921,16 @@ def log_selection_tick(eligible_count: int, tradeable_count: int, top_token: str
                        top_score: float | None, opened: bool, reason_no_trade: str | None,
                        rej: dict, stall_example: tuple | None = None,
                        best_token: str | None = None, best_score: float | None = None,
-                       best_block_reason: str | None = None):
+                       best_block_reason: str | None = None,
+                       whatif: dict | None = None):
     """v1.13+: Write one heartbeat row per selection interval to selection_tick_log.
     stall_example: (token_symbol, reason_str) for the first token that failed the gate.
     best_token/best_score/best_block_reason: highest-scoring eligible token even when
     no tradeable tokens exist — populated on zero-open ticks for diagnostics.
+    whatif: dict of what-if gate counter results, e.g.
+      {'no_pf_stability': 3, 'no_anti_chase': 2, ...}
     """
+    wi = whatif or {}
     try:
         conn = get_conn()
         ex_tok = stall_example[0] if stall_example else None
@@ -928,8 +942,10 @@ def log_selection_tick(eligible_count: int, tradeable_count: int, top_token: str
              rej_lane_age, rej_lane_liq, rej_lane_vol, rej_lane_pf_early,
              rej_anti_chase, rej_friction, rej_vol_cap, rej_rug, rej_jup_fail, rej_pf_stability,
              stall_example_token, stall_example_reason,
-             best_token, best_score, best_block_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             best_token, best_score, best_block_reason,
+             whatif_no_pf_stability, whatif_no_anti_chase, whatif_no_pf_early,
+             whatif_no_lane_liq, whatif_no_lane_vol)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now(timezone.utc).isoformat(), _RUN_ID,
             eligible_count, tradeable_count, top_token, top_score,
@@ -939,6 +955,8 @@ def log_selection_tick(eligible_count: int, tradeable_count: int, top_token: str
             rej.get("rug", 0), rej.get("jup_fail", 0), rej.get("pf_stability", 0),
             ex_tok, ex_rsn,
             best_token, best_score, best_block_reason,
+            wi.get("no_pf_stability", 0), wi.get("no_anti_chase", 0), wi.get("no_pf_early", 0),
+            wi.get("no_lane_liq", 0), wi.get("no_lane_vol", 0),
         ))
         conn.commit()
         conn.close()
@@ -1384,6 +1402,62 @@ def _check_tradeable(row: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _count_tradeable_without(all_rows: list[dict], skip_gate: str) -> int:
+    """Instrumentation only — count how many tokens from all_rows would pass
+    _check_tradeable if exactly one gate is disabled.  Does NOT affect trading.
+    skip_gate must be one of: 'pf_stability', 'anti_chase', 'pf_early',
+    'lane_liq', 'lane_vol'.
+    """
+    count = 0
+    for row in all_rows:
+        lane = classify_lane(row)
+        # pf_early gate
+        if lane == "pumpfun_early":
+            if skip_gate == "pf_early":
+                pass  # pretend this gate doesn't exist
+            else:
+                continue
+        age_h   = row.get("age_hours") or 0
+        liq_usd = row.get("liq_usd") or 0
+        vol_24h = row.get("vol_h24") or 0
+        if age_h < LANE_GATE_MIN_AGE_H:
+            continue  # age gate is never skipped
+        if liq_usd < LANE_GATE_MIN_LIQ_USD:
+            if skip_gate != "lane_liq":
+                continue
+        if vol_24h < LANE_GATE_MIN_VOL_24H:
+            if skip_gate != "lane_vol":
+                continue
+        if ANTI_CHASE_FILTER_ENABLED and skip_gate != "anti_chase":
+            r_m5 = row.get("r_m5") or 0
+            if r_m5 > R_M5_CHASE_CAP:
+                continue
+        if RUG_FILTER_ENABLED:
+            is_risky, _ = check_rug_risk(row, "pullback_score_rank")
+            if is_risky:
+                continue  # rug gate is never skipped
+        if lane == "pumpfun_mature" and skip_gate != "pf_stability":
+            rv5m_check = row.get("rv_5m")
+            if rv5m_check is None:
+                continue
+            if rv5m_check > PF_MATURE_RV5M_MAX:
+                continue
+            range5m = row.get("range_5m")
+            if range5m is not None and rv5m_check > 0 and range5m > PF_MATURE_RANGE_MULT * rv5m_check:
+                continue
+        if ADAPTIVE_EXITS_ENABLED:
+            mint = row.get("mint_address", "")
+            rv5m = get_rv5m_for_mint(mint)
+            if rv5m is not None and (K_SL * rv5m) > VOL_CAP_PCT:
+                continue  # vol_cap gate is never skipped
+        # Jupiter friction (use cached RT, skip live call for speed)
+        cached_rt = row.get("round_trip_pct")
+        if cached_rt is not None and cached_rt > FRICTION_GATE_MAX_RT:
+            continue  # friction gate is never skipped
+        count += 1
+    return count
+
+
 def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str | None:
     """
     v1.12: Build tradeable set E, require |E|>=2, pick strategy=top-score,
@@ -1488,15 +1562,37 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
                 f"vol24h=${vol_nm:,.0f} r_m5={r_m5_nm:.2f}% rv5m={rv5m_nm:.3f}% "
                 f"pairCreatedAt={pair_ts}"
             )
+        # ── What-if gate counters (instrumentation only, no trading impact) ────
+        _whatif = {
+            "no_pf_stability": _count_tradeable_without(all_rows, "pf_stability"),
+            "no_anti_chase":   _count_tradeable_without(all_rows, "anti_chase"),
+            "no_pf_early":     _count_tradeable_without(all_rows, "pf_early"),
+            "no_lane_liq":     _count_tradeable_without(all_rows, "lane_liq"),
+            "no_lane_vol":     _count_tradeable_without(all_rows, "lane_vol"),
+        }
+        logger.info(
+            f"RANK {strategy}: WHAT-IF gate relief: "
+            f"no_pf_stab={_whatif['no_pf_stability']} no_anti_chase={_whatif['no_anti_chase']} "
+            f"no_pf_early={_whatif['no_pf_early']} no_liq={_whatif['no_lane_liq']} no_vol={_whatif['no_lane_vol']}"
+        )
         log_selection_tick(len(eligible_rows), 0, None, None, False, "no_tradeable_tokens", rej_counts, stall_example,
-                           best_token=_best_diag_token, best_score=_best_diag_score, best_block_reason=_best_diag_block)
+                           best_token=_best_diag_token, best_score=_best_diag_score, best_block_reason=_best_diag_block,
+                           whatif=_whatif)
         return None
-
     # ── Require |E| >= 2 ──────────────────────────────────────────────────────
     if len(tradeable_set) < 2:
         only = tradeable_set[0].get("token_symbol", "?")
         logger.info(f"RANK {strategy}: |E|={len(tradeable_set)} < 2 — skipping (need baseline slot)")
-        log_selection_tick(len(eligible_rows), len(tradeable_set), only, scored[0][0], False, "tradeable_lt_2", rej_counts, stall_example)
+        # What-if counters on tradeable_lt_2 ticks too
+        _whatif = {
+            "no_pf_stability": _count_tradeable_without(all_rows, "pf_stability"),
+            "no_anti_chase":   _count_tradeable_without(all_rows, "anti_chase"),
+            "no_pf_early":     _count_tradeable_without(all_rows, "pf_early"),
+            "no_lane_liq":     _count_tradeable_without(all_rows, "lane_liq"),
+            "no_lane_vol":     _count_tradeable_without(all_rows, "lane_vol"),
+        }
+        log_selection_tick(len(eligible_rows), len(tradeable_set), only, scored[0][0], False, "tradeable_lt_2", rej_counts, stall_example,
+                           whatif=_whatif)
         return None
 
     # ── Pick strategy = top-score, baseline = random from E\{strategy} ────────
