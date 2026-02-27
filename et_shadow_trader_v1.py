@@ -1608,6 +1608,15 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
         f"lane={classify_lane(best)} | baseline={baseline_row.get('token_symbol','?')}"
     )
 
+    # ── Compute best-token diagnostics for all opened=0 ticks ─────────────────
+    # (best scoring eligible token and its first failing gate — for logging only)
+    def _best_diag_for_best(b_row, b_score):
+        """Return (token, score, block_reason) for the top candidate."""
+        tok = b_row.get("token_symbol", "?") if b_row else None
+        sc  = b_score
+        ok, blk = _check_tradeable(b_row) if b_row else (True, None)
+        return tok, sc, (None if ok else blk)
+
     # ── Check position cap for strategy (baseline always exempt) ──────────────
     if not passes_position_cap(strategy):
         # v1.14: show which trade is holding the cap slot
@@ -1634,19 +1643,45 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
             )
         else:
             logger.info(f"RANK {strategy}: position cap reached — no open trade found (race?)")
-        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "position_cap", rej_counts)
+        _bt, _bs, _bb = _best_diag_for_best(best, best_score)
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "position_cap", rej_counts,
+                           best_token=_bt, best_score=_bs, best_block_reason=_bb)
         return None
-
-    # ── Open strategy trade ────────────────────────────────────────────────────
-    tid = open_trade(strategy, best, entry_score=best_score)
+    # ── Open strategy trade ────────────────────────────────────────────
+    try:
+        tid = open_trade(strategy, best, entry_score=best_score)
+    except Exception as _e:
+        _bt, _bs, _bb = _best_diag_for_best(best, best_score)
+        _reason = f"open_failed:{type(_e).__name__}:{_e}"
+        logger.error(f"RANK {strategy}: strategy open_trade raised exception: {_e}")
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, _reason, rej_counts,
+                           best_token=_bt, best_score=_bs, best_block_reason=_bb)
+        return None
     if not tid:
+        _bt, _bs, _bb = _best_diag_for_best(best, best_score)
         logger.warning(f"RANK {strategy}: strategy open_trade returned None unexpectedly")
-        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "strategy_open_failed", rej_counts)
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "strategy_open_failed", rej_counts,
+                           best_token=_bt, best_score=_bs, best_block_reason=_bb)
         return None
-
-    # ── Open baseline (EXEMPT from all position caps) ─────────────────────────
+    # ── Open baseline (EXEMPT from all position caps) ─────────────────────
     baseline_strat = "baseline_matched_pullback_score_rank"
-    btid = open_trade(baseline_strat, baseline_row, baseline_trigger_id=tid)
+    try:
+        btid = open_trade(baseline_strat, baseline_row, baseline_trigger_id=tid)
+    except Exception as _e:
+        _bt, _bs, _bb = _best_diag_for_best(best, best_score)
+        _reason = f"open_failed:{type(_e).__name__}:{_e}"
+        logger.error(f"RANK {strategy}: baseline open_trade raised exception: {_e}")
+        # Atomic rollback
+        try:
+            conn = get_conn()
+            conn.execute("DELETE FROM shadow_trades_v1 WHERE trade_id=?", (tid,))
+            conn.commit(); conn.close()
+            logger.info(f"RANK {strategy}: strategy trade {tid[:8]} deleted (atomic rollback OK)")
+        except Exception as _re:
+            logger.error(f"atomic rollback DELETE failed: {_re} — trade {tid[:8]} may be orphaned")
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, _reason, rej_counts,
+                           best_token=_bt, best_score=_bs, best_block_reason=_bb)
+        return None
     if not btid:
         # v1.13: TRUE ATOMIC ROLLBACK — delete the strategy trade so no orphaned rows exist
         logger.warning(
@@ -1661,14 +1696,16 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
             logger.info(f"RANK {strategy}: strategy trade {tid[:8]} deleted (atomic rollback OK)")
         except Exception as e:
             logger.error(f"atomic rollback DELETE failed: {e} — trade {tid[:8]} may be orphaned")
-        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "baseline_open_failed", rej_counts)
+        _bt, _bs, _bb = _best_diag_for_best(best, best_score)
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, False, "baseline_open_failed", rej_counts,
+                           best_token=_bt, best_score=_bs, best_block_reason=_bb)
         return None
     else:
         logger.info(
             f"RANK {strategy}: PAIR OPENED strategy={tid[:8]} baseline={btid[:8]} "
             f"strategy_token={best.get('token_symbol','?')} baseline_token={baseline_row.get('token_symbol','?')}"
         )
-        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, True, None, rej_counts)
+        log_selection_tick(len(eligible_rows), len(tradeable_set), best.get("token_symbol"), best_score, True, "opened", rej_counts)
     return tid
 
 # ── OPEN TRADE ────────────────────────────────────────────────────────────────
