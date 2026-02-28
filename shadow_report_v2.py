@@ -503,41 +503,55 @@ if mode in ("mini", "decision"):
                 tok2 = f"{p['s_token']}({mp2})"
                 print(f"    {p['s_id'][:8]:<10} {tok2:<18} {ep:>12.8f} {mxp:>12.8f} {mnp:>12.8f} {mfe_chk:>7.4f}% {mae_chk:>7.4f}%")
             print(f"    Formula: MFE = max_price/entry_price - 1  |  MAE = min_price/entry_price - 1")
+        # MFE definition clarification block
+        print(f"  DEFINITIONS:")
+        print(f"    MFE_gross = max(price_seen / entry_price - 1, 0) * 100  [clamped at 0 at entry]")
+        print(f"    MAE_gross = (min_price_seen / entry_price - 1) * 100    [always <=0]")
+        print(f"    fee_floor = entry_round_trip_pct*100 + 1.00%  [RT slippage + fixed 1%]")
+        print(f"    MFE_net   = MFE_gross - fee_floor              [>0 = profit was available]")
+        print(f"    %MFE_net>=0   = fraction of trades where profit was available at any point")
+        print(f"    %MFE_net>=+0.25% = fraction with meaningful profit window (>0.25% after fees)")
+        print()
         # Helper to compute and print aggregate stats for a given set of pairs
         def _print_mfe_aggregate(label: str, pset: list):
             if not pset:
                 print(f"  {label}: no data")
                 return
             ff, mfe_p, mae_p, mfe_nd, mfe_nf = [], [], [], [], []
-            above_025 = above_100 = 0
+            n_mfe_net_ge0 = n_mfe_net_ge025 = 0
             for p in pset:
                 rt_dec = p["s_rt"] if p["s_rt"] is not None else 0.005
                 fee_floor = rt_dec * 100 + 1.00
-                mfe = (p["s_mfe"] or 0.0) * 100
+                # MFE_gross clamped at 0 (cannot be negative — price can only go up from entry)
+                mfe_raw = (p["s_mfe"] or 0.0) * 100
+                mfe = max(mfe_raw, 0.0)
                 mae = (p["s_mae"] or 0.0) * 100
+                mfe_net = (p["s_mfe_net_fee100"] * 100
+                           if p["s_mfe_net_fee100"] is not None
+                           else mfe - fee_floor)
                 ff.append(fee_floor); mfe_p.append(mfe); mae_p.append(mae)
                 mfe_nd.append(p["s_mfe_net_dex"] * 100 if p["s_mfe_net_dex"] is not None else mfe - (rt_dec * 100 + 0.60))
-                mfe_nf.append(p["s_mfe_net_fee100"] * 100 if p["s_mfe_net_fee100"] is not None else mfe - fee_floor)
-                if mfe >= fee_floor + 0.25: above_025 += 1
-                if mfe >= fee_floor + 1.00: above_100 += 1
+                mfe_nf.append(mfe_net)
+                if mfe_net >= 0:    n_mfe_net_ge0   += 1
+                if mfe_net >= 0.25: n_mfe_net_ge025 += 1
             n = len(pset)
             print(f"\n  AGGREGATE — {label} ({n} pairs):")
             print(f"  avg fee_floor (RT+1%)          : {sum(ff)/n:+.4f}%")
-            print(f"  avg MFE gross (strategy leg)   : {sum(mfe_p)/n:+.4f}%")
-            print(f"  avg MAE gross (strategy leg)   : {sum(mae_p)/n:+.4f}%")
-            print(f"  avg MFE_net vs DEX floor (RT+0.6%): {sum(mfe_nd)/n:+.4f}%")
-            print(f"  avg MFE_net vs fee100 floor (RT+1%): {sum(mfe_nf)/n:+.4f}%")
-            print(f"  % MFE >= floor+0.25%           : {100*above_025/n:.1f}%  ({above_025}/{n})")
-            print(f"  % MFE >= floor+1.00%           : {100*above_100/n:.1f}%  ({above_100}/{n})")
+            print(f"  avg MFE_gross (clamped at 0)   : {sum(mfe_p)/n:+.4f}%")
+            print(f"  avg MAE_gross                  : {sum(mae_p)/n:+.4f}%")
+            print(f"  avg MFE_net (vs fee100 floor)  : {sum(mfe_nf)/n:+.4f}%")
+            print(f"  avg MFE_net (vs DEX floor RT+0.6%): {sum(mfe_nd)/n:+.4f}%")
+            print(f"  %MFE_net >= 0                  : {100*n_mfe_net_ge0/n:.1f}%  ({n_mfe_net_ge0}/{n})")
+            print(f"  %MFE_net >= +0.25%             : {100*n_mfe_net_ge025/n:.1f}%  ({n_mfe_net_ge025}/{n})")
             print(f"  MFE/MAE by lane (strategy leg):")
             lane_map: dict = {}
             for p in pset:
                 ln = p["s_lane"] or "unknown"
                 lane_map.setdefault(ln, {"mfe": [], "mae": []})
-                lane_map[ln]["mfe"].append((p["s_mfe"] or 0.0) * 100)
+                lane_map[ln]["mfe"].append(max((p["s_mfe"] or 0.0) * 100, 0.0))
                 lane_map[ln]["mae"].append((p["s_mae"] or 0.0) * 100)
             for ln, vals in sorted(lane_map.items(), key=lambda x: -len(x[1]["mfe"])):
-                print(f"    {ln:<28} n={len(vals['mfe']):>3}  avg_MFE={sum(vals['mfe'])/len(vals['mfe']):+.4f}%  avg_MAE={sum(vals['mae'])/len(vals['mae']):+.4f}%")
+                print(f"    {ln:<28} n={len(vals['mfe']):>3}  avg_MFE_gross={sum(vals['mfe'])/len(vals['mfe']):+.4f}%  avg_MAE={sum(vals['mae'])/len(vals['mae']):+.4f}%")
 
         if n_mfe_all_rows > 0:
             _print_mfe_aggregate("ALL ROWS (incl. price_mismatch)", pairs_with_mfe_all_rows)
@@ -698,13 +712,17 @@ if mode in ("mini", "decision"):
             print(f"  avg k_change_pct at trigger: {avg_k_drop:.2f}%")
             if avg_liq_drop_pct is not None:
                 print(f"  avg liq_pct_drop at trigger: {avg_liq_drop_pct:.2f}%")
-            print(f"\n  Per-event detail (max 10):")
-            print(f"    {'logged_at':<20} {'token(mint)':<18} {'k_drop%':>8} {'liq_bef$':>10} {'liq_aft$':>10} {'jup_rt':>8} {'jup_ok':>7} {'gross%':>8}")
-            print(f"    {'-'*95}")
-            for r in lp_rows[:10]:
+            # Check if pool_type column exists in lp_removal_log
+            lp_cols = [row[1] for row in conn.execute("PRAGMA table_info(lp_removal_log)").fetchall()]
+            has_pool_type = "pool_type" in lp_cols
+            print(f"\n  Per-event detail (max 20):")
+            hdr = f"    {'logged_at':<20} {'token(mint)':<22} {'k_drop%':>8} {'liq_bef$':>12} {'liq_aft$':>12} {'pool_type':<14} {'jup_rt%':>8} {'jup_ok':>7} {'gross%':>8}"
+            print(hdr)
+            print(f"    {'-'*115}")
+            for r in lp_rows[:20]:
                 sym_r = r["token_symbol"] or "?"
                 mp_r  = r["mint_prefix"] or (r["mint_address"] or "")[:8]
-                tok_r = f"{sym_r}({mp_r})"
+                tok_r = f"{sym_r}({mp_r[:8]})"
                 k_d   = (r["k_change_pct"] or 0) * 100
                 lb    = r["liq_before_usd"] or 0
                 la    = r["liq_after_usd"] or 0
@@ -712,9 +730,24 @@ if mode in ("mini", "decision"):
                 jok   = "OK" if r["jup_route_ok"] == 1 else ("FAIL" if r["jup_route_ok"] == 0 else "NULL")
                 gp    = (r["gross_pnl_pct"] or 0) * 100
                 jrt_s = f"{jrt*100:.3f}%" if jrt is not None else "N/A"
-                print(f"    {(r['logged_at'] or '')[:19]:<20} {tok_r:<18} {k_d:>7.2f}% {lb:>10,.0f} {la:>10,.0f} {jrt_s:>8} {jok:>7} {gp:>7.4f}%")
-            if n_lp > 10:
-                print(f"    ... ({n_lp - 10} more rows not shown)")
+                pt    = (r["pool_type"] if has_pool_type and r["pool_type"] else "N/A")
+                print(f"    {(r['logged_at'] or '')[:19]:<20} {tok_r:<22} {k_d:>7.2f}% {lb:>12,.0f} {la:>12,.0f} {pt:<14} {jrt_s:>8} {jok:>7} {gp:>7.4f}%")
+            if n_lp > 20:
+                print(f"    ... ({n_lp - 20} more rows not shown)")
+            # Summary: how often did Jup route succeed at lp_removal exit?
+            print(f"\n  lp_removal exit quality summary:")
+            print(f"    Jup route at exit: OK={n_jup_ok}  FAIL={n_jup_fail}  NULL={n_jup_null}")
+            print(f"    avg k_drop%: {avg_k_drop:.2f}%  (k = constant product; large drop = real rug)")
+            if avg_liq_drop_pct is not None:
+                print(f"    avg liq_pct_drop: {avg_liq_drop_pct:.2f}%")
+            if has_pool_type:
+                pt_counts: dict = {}
+                for r in lp_rows:
+                    pt = r["pool_type"] or "unknown"
+                    pt_counts[pt] = pt_counts.get(pt, 0) + 1
+                print(f"    pool_type breakdown: {dict(sorted(pt_counts.items(), key=lambda x: -x[1]))}")
+            else:
+                print(f"    pool_type: column not yet in lp_removal_log (requires v1.21+)")
 
 # ── DECISION REPORT (n>=20) ────────────────────────────────────────────────────
 if mode == "decision":
@@ -763,20 +796,69 @@ if mode == "decision":
     # Concentration check
     print("\n4) CONCENTRATION CHECK (top-5 token contribution)")
     print("-" * 70)
+    # Build per-token key as SYMBOL(mint_prefix) for collision-safe display
+    def _tok_key(p):
+        mp = p["s_mint_prefix"] or (p["s_mint"] or "")[:8] if (p["s_mint_prefix"] or p["s_mint"]) else "?"
+        return f"{p['s_token']}({mp[:8]})"
     token_deltas = {}
+    token_key_map = {}  # symbol -> SYMBOL(mint_prefix)
     for p in pairs:
-        tok = p["s_token"]
+        tk = _tok_key(p)
         sf = (p["s_fee100"] or 0.0) * 100
         bf = (p["b_fee100"] or 0.0) * 100
-        token_deltas[tok] = token_deltas.get(tok, 0) + (sf - bf)
+        token_deltas[tk] = token_deltas.get(tk, 0) + (sf - bf)
+        token_key_map[p["s_token"]] = tk
     total_abs = sum(abs(v) for v in token_deltas.values())
     sorted_toks = sorted(token_deltas.items(), key=lambda x: abs(x[1]), reverse=True)
     top3_abs = sum(abs(v) for _, v in sorted_toks[:3])
     conc_pct = (top3_abs / total_abs * 100) if total_abs > 0 else 0.0
     print(f"  top-3 token concentration: {conc_pct:.1f}% of total |delta|")
-    for tok, dv in sorted_toks[:5]:
-        n_tok = sum(1 for p in pairs if p["s_token"] == tok)
-        print(f"    {tok:<15} n={n_tok}  cumulative_delta={dv:+.4f}%")
+    for tk, dv in sorted_toks[:5]:
+        n_tok = sum(1 for p in pairs if _tok_key(p) == tk)
+        print(f"    {tk:<22} n={n_tok}  cumulative_delta={dv:+.4f}%")
+
+    # ── 4b) EDGE WITHOUT WETH ─────────────────────────────────────────────────
+    print("\n4b) EDGE WITHOUT WETH (WETH excluded from all metrics)")
+    print("-" * 70)
+    noweth_pairs = [p for p in pairs if (p["s_token"] or "").upper() != "WETH"]
+    n_weth = n_pairs - len(noweth_pairs)
+    print(f"  WETH pairs excluded: {n_weth}  |  remaining n: {len(noweth_pairs)}")
+    if len(noweth_pairs) >= 3:
+        nw_deltas = [(p["s_fee100"] or 0.0)*100 - (p["b_fee100"] or 0.0)*100 for p in noweth_pairs]
+        nw_strat  = sum((p["s_fee100"] or 0.0)*100 for p in noweth_pairs) / len(noweth_pairs)
+        nw_base   = sum((p["b_fee100"] or 0.0)*100 for p in noweth_pairs) / len(noweth_pairs)
+        nw_mn, nw_med, nw_pct = summary_stats(nw_deltas)
+        nw_ci_lo, nw_ci_hi = bootstrap_ci(nw_deltas)
+        nw_verdict = "POSITIVE EDGE" if nw_ci_lo > 0 else ("NEGATIVE EDGE" if nw_ci_hi < 0 else "INCONCLUSIVE")
+        print(f"  mean strategy_fee100% : {nw_strat:+.4f}%")
+        print(f"  mean baseline_fee100% : {nw_base:+.4f}%")
+        print(f"  mean delta            : {nw_mn:+.4f}%")
+        print(f"  median delta          : {nw_med:+.4f}%")
+        print(f"  %delta > 0            : {nw_pct:.1f}%")
+        print(f"  95% CI                : [{nw_ci_lo:+.4f}%, {nw_ci_hi:+.4f}%]")
+        print(f"  VERDICT               : {nw_verdict}")
+    else:
+        print(f"  Insufficient pairs without WETH (n={len(noweth_pairs)}) for CI.")
+    # Per-token delta breakdown (all tokens, SYMBOL(mint_prefix) display)
+    print()
+    print(f"  Per-token delta breakdown:")
+    print(f"    {'token(mint)':<22} {'n':>4} {'mean_strat%':>12} {'mean_delta%':>12} {'%delta>0':>10} {'95% CI':>22}")
+    print(f"    {'-'*86}")
+    tok_groups: dict = {}
+    for p in pairs:
+        tk = _tok_key(p)
+        tok_groups.setdefault(tk, [])
+        tok_groups[tk].append(p)
+    for tk, tpairs in sorted(tok_groups.items(), key=lambda x: -len(x[1])):
+        td = [(p["s_fee100"] or 0.0)*100 - (p["b_fee100"] or 0.0)*100 for p in tpairs]
+        ts = sum((p["s_fee100"] or 0.0)*100 for p in tpairs) / len(tpairs)
+        tm, _, tp = summary_stats(td)
+        if len(td) >= 3:
+            tc_lo, tc_hi = bootstrap_ci(td)
+            ci_s = f"[{tc_lo:+.3f}%, {tc_hi:+.3f}%]"
+        else:
+            ci_s = "n<3"
+        print(f"    {tk:<22} {len(tpairs):>4} {ts:>+11.4f}% {tm:>+11.4f}% {tp:>9.1f}% {ci_s:>22}")
 
     # Trimmed mean (drop top/bottom 10%)
     n = len(deltas)
