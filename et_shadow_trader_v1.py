@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.22
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.23
+
+v1.23 additions (2026-02-28):
+  - Liq gate relaxed: LANE_GATE_MIN_LIQ_USD $50k -> $25k (single controlled change).
+  - All other params frozen: age 12h, vol_h1 $10k, pf_stability, anti_chase, ALLOWED_LANES.
 
 v1.22 additions (2026-02-28):
   - Age gate relaxed: LANE_GATE_MIN_AGE_H 24h -> 12h (single controlled change).
@@ -1048,7 +1052,7 @@ def log_selection_tick(eligible_count: int, tradeable_count: int, top_token: str
 # These are enforced in _check_tradeable() before the friction gate.
 # v1.20: tightened for pumpfun_mature universe.
 LANE_GATE_MIN_AGE_H    = 12.0      # hours — v1.22: relaxed from 24h to 12h (single controlled change)
-LANE_GATE_MIN_LIQ_USD  = 50_000    # USD — v1.20: lowered from 100k (pumpfun_mature typical range)
+LANE_GATE_MIN_LIQ_USD  = 25_000    # USD — v1.23: lowered from 50k (single controlled change)
 LANE_GATE_MIN_VOL_24H  = 100_000   # USD — 24h vol floor (secondary check)
 LANE_GATE_MIN_VOL_H1   = 10_000    # USD — v1.20: NEW — vol_h1 >= $10k/h hard gate
 
@@ -2188,8 +2192,8 @@ def _compute_run_signature() -> str:
         "lane_gate_min_vol_h1": LANE_GATE_MIN_VOL_H1,
         "lane_pumpfun_early": "BLOCKED",
         "lane_pumpfun_mature": f"rv5m<={PF_MATURE_RV5M_MAX}",
-        "lane_non_pumpfun_mature": "BLOCKED_v1.22",
-        "lane_large_cap_ray": "BLOCKED_v1.22",
+        "lane_non_pumpfun_mature": "BLOCKED_v1.23",
+        "lane_large_cap_ray": "BLOCKED_v1.23",
         "lane_mature_pumpswap": f"rv5m<={PF_MATURE_RV5M_MAX}",
     }
     canonical = json.dumps(sig_params, sort_keys=True)
@@ -2214,7 +2218,7 @@ def _register_run():
     })
     lane_gates = (f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% "
                   f"mature_pumpswap=rv5m<={PF_MATURE_RV5M_MAX}% "
-                  f"non_pumpfun_mature=BLOCKED_v1.22 large_cap_ray=BLOCKED_v1.22 "
+                  f"non_pumpfun_mature=BLOCKED_v1.23 large_cap_ray=BLOCKED_v1.23 "
                   f"allowed_lanes={sorted(ALLOWED_LANES) if ALLOWED_LANES else 'ALL'} "
                   f"age_h>={LANE_GATE_MIN_AGE_H} "
                   f"liq>={LANE_GATE_MIN_LIQ_USD} vol_h1>={LANE_GATE_MIN_VOL_H1}")
@@ -2226,10 +2230,10 @@ def _register_run():
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.22", lane_gates, key_params, sig))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.23", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.22 mode={MODE} signature={sig}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.23 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
@@ -2685,7 +2689,7 @@ def run():
     logger.info(f"  Pullback strict:       log-only (not trading)")
     logger.info(f"  pullback_score_rank:   SOLE ACTIVE STRATEGY (interval={SCORE_RANK_INTERVAL_SEC}s top-1/hour)")
     logger.info(f"  Anti-chase filter:     {'ENABLED' if ANTI_CHASE_FILTER_ENABLED else 'DISABLED'} r_m5_cap={R_M5_CHASE_CAP}%")
-    logger.info(f"  Lane split (v1.22):    pumpfun_early=BLOCKED pumpfun_mature=ELIGIBLE(rv5m<={PF_MATURE_RV5M_MAX}%) mature_pumpswap=ELIGIBLE(rv5m<={PF_MATURE_RV5M_MAX}%) non_pumpfun_mature=BLOCKED large_cap_ray=BLOCKED age>={LANE_GATE_MIN_AGE_H}h")
+    logger.info(f"  Lane split (v1.23):    pumpfun_early=BLOCKED pumpfun_mature=ELIGIBLE(rv5m<={PF_MATURE_RV5M_MAX}%) mature_pumpswap=ELIGIBLE(rv5m<={PF_MATURE_RV5M_MAX}%) non_pumpfun_mature=BLOCKED large_cap_ray=BLOCKED age>={LANE_GATE_MIN_AGE_H}h liq>=${LANE_GATE_MIN_LIQ_USD:,.0f}")
     logger.info(f"  run_id:                {_RUN_ID}")
     logger.info(f"  git_commit:            {_GIT_COMMIT}")
     logger.info("=" * 65)
