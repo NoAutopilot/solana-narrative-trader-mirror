@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.24
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.25
+
+v1.25 additions (2026-03-01):
+  - pf_stability range_5m floor: range_5m <= 3 * max(rv5m, 0.10%).
+    Single controlled change. All other gates frozen.
 
 v1.24 additions (2026-03-01):
   - BUG FIX (P0): UnboundLocalError in diagnostic logging when |E|=1.
@@ -1468,8 +1472,11 @@ def _check_tradeable(row: dict) -> tuple[bool, str]:
         if rv5m_check > PF_MATURE_RV5M_MAX:
             return False, f"pf_stability:rv5m={rv5m_check:.3f}%>{PF_MATURE_RV5M_MAX}%"
         range5m = row.get("range_5m")
-        if range5m is not None and rv5m_check > 0 and range5m > PF_MATURE_RANGE_MULT * rv5m_check:
-            return False, f"pf_stability:range_5m={range5m:.3f}%>{PF_MATURE_RANGE_MULT}xrv5m"
+        # v1.25: floor rv5m at 0.10% so range_5m gate is range_5m <= 3 * max(rv5m, 0.10%)
+        # This prevents very-low-rv5m tokens from being blocked by the ratio alone.
+        _rv5m_floored = max(rv5m_check, 0.10)
+        if range5m is not None and range5m > PF_MATURE_RANGE_MULT * _rv5m_floored:
+            return False, f"pf_stability:range_5m={range5m:.3f}%>{PF_MATURE_RANGE_MULT}x max(rv5m={rv5m_check:.3f}%,0.10%)={_rv5m_floored:.3f}%"
     # Vol cap
     if ADAPTIVE_EXITS_ENABLED:
         mint = row.get("mint_address", "")
@@ -1575,7 +1582,9 @@ def _count_tradeable_without(all_rows: list[dict], skip_gate: str) -> int:
             if rv5m_check > PF_MATURE_RV5M_MAX:
                 continue
             range5m = row.get("range_5m")
-            if range5m is not None and rv5m_check > 0 and range5m > PF_MATURE_RANGE_MULT * rv5m_check:
+            # v1.25: same floor as main gate
+            _rv5m_floored = max(rv5m_check, 0.10)
+            if range5m is not None and range5m > PF_MATURE_RANGE_MULT * _rv5m_floored:
                 continue
         if ADAPTIVE_EXITS_ENABLED:
             mint = row.get("mint_address", "")
@@ -1592,7 +1601,10 @@ def _count_tradeable_without(all_rows: list[dict], skip_gate: str) -> int:
 
 def _log_pf_stability_counterfactual(eligible_rows: list[dict], score_fn) -> None:
     """
-    v1.21: Each tick, find the highest-scoring token that is blocked ONLY by
+    v1.25: pf_stability range_5m floor: range_5m <= 3 * max(rv5m, 0.10%).
+         Prevents very-low-rv5m tokens from being blocked by ratio alone.
+         All other gates frozen (age 24h, liq $25k, vol_h1 $10k, anti_chase, lanes).
+  v1.24: Each tick, find the highest-scoring token that is blocked ONLY by
     pf_stability (rv5m or range_5m gate) and log it to pf_stability_counterfactual_log.
     Informational only — never traded.
     """
@@ -2238,10 +2250,10 @@ def _register_run():
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.24", lane_gates, key_params, sig))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.25", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.24 mode={MODE} signature={sig}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.25 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
