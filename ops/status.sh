@@ -37,15 +37,10 @@ SERVICE="solana-trader.service"
 echo ""
 echo "── COMMIT ──────────────────────────────────────────────────────"
 cd "${VPS_DIR}"
-GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo 'NOT_A_GIT_REPO')"
 DEPLOYED_SHA="$(cat .deployed_sha 2>/dev/null | cut -c1-7 || echo 'NO_DEPLOYED_SHA')"
-echo "  git HEAD:      ${GIT_SHA}"
-echo "  deployed_sha:  ${DEPLOYED_SHA}"
-if [[ "${GIT_SHA}" == "${DEPLOYED_SHA}" ]]; then
-    echo "  match:         YES ✓"
-else
-    echo "  match:         NO — git=${GIT_SHA} deployed=${DEPLOYED_SHA} (file deployed without git commit)"
-fi
+DEPLOYED_FULL="$(cat .deployed_sha 2>/dev/null || echo 'NO_DEPLOYED_SHA')"
+echo "  deployed_sha:  ${DEPLOYED_SHA}  (GitHub master)"
+echo "  full_sha:      ${DEPLOYED_FULL}"
 
 echo ""
 echo "── SERVICE ─────────────────────────────────────────────────────"
