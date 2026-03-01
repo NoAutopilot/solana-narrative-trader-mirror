@@ -74,14 +74,14 @@ from datetime import datetime, timezone, timedelta
 
 conn = sqlite3.connect('${DB}', timeout=10)
 
-# Latest scanner snapshot
+# Latest universe snapshot
 snap = conn.execute('''
-    SELECT snapshot_ts, COUNT(*) as total,
+    SELECT snapshot_at, COUNT(*) as total,
            SUM(CASE WHEN age_hours IS NULL THEN 1 ELSE 0 END) as null_age,
            SUM(CASE WHEN pair_created_at IS NULL THEN 1 ELSE 0 END) as null_pca
-    FROM scanner_snapshot
-    WHERE snapshot_ts = (SELECT MAX(snapshot_ts) FROM scanner_snapshot)
-    GROUP BY snapshot_ts
+    FROM universe_snapshot
+    WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM universe_snapshot)
+    GROUP BY snapshot_at
 ''').fetchone()
 if snap:
     print(f'  snapshot:  {snap[0][:19]}  total={snap[1]}  null_age={snap[2]}  null_pca={snap[3]}')
@@ -103,7 +103,7 @@ print(f'  |E|>=2 rate (6h): {e_ge2}/{total_fires} fires = {rate}%')
 
 # Top blocker
 blockers = conn.execute('''
-    SELECT rej_pf_stability, rej_anti_chase, rej_pf_early, rej_lane_age,
+    SELECT rej_pf_stability, rej_anti_chase, rej_lane_pf_early, rej_lane_age,
            rej_lane_liq, rej_lane_vol, rej_rug
     FROM selection_tick_log
     WHERE logged_at >= ?
