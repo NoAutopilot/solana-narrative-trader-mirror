@@ -708,18 +708,34 @@ def scan_and_log():
         _c2.commit(); _c2.close()
     except Exception as _e:
         pass
+    # Venue breakdown for eligible tokens
+    venue_counts: dict[str, int] = {}
+    for row in snap_rows:
+        if row[7] == 1:  # eligible=1
+            v = row[5] or "unknown"  # venue
+            venue_counts[v] = venue_counts.get(v, 0) + 1
+    venue_str = "  ".join(f"{v}={n}" for v, n in sorted(venue_counts.items(), key=lambda x: -x[1]))
     logger.info(
-        f"Scan complete: {total_fetched} fetched | {n_eligible} eligible | "
+        f"Scan complete: {total_fetched} fetched | eligible_snapshot={n_eligible} | "
         f"rejected: pool_type={rejections['pool_type']} quote={rejections['quote']} "
         f"age={rejections['age']} vol={rejections['vol']} liq={rejections['liq']} | "
-        f"jup_validated={n_jup_validated}"
+        f"jup_validated={n_jup_validated} | venue: {venue_str}"
     )
 
 def run():
+    import hashlib
+    _self_path = os.path.abspath(__file__)
+    try:
+        with open(_self_path, "rb") as _f:
+            _sha256 = hashlib.sha256(_f.read()).hexdigest()[:16]
+    except Exception:
+        _sha256 = "unknown"
     logger.info("=" * 65)
     logger.info("Existing Tokens Universe Scanner v2 starting (P0+P1)")
+    logger.info(f"  FILE: {_self_path}")
+    logger.info(f"  SHA256[:16]: {_sha256}")
     logger.info(f"  Discovery rule: {DISCOVERY_RULE['version']}")
-    logger.info(f"  Impact gate: RT ≤ {ROUND_TRIP_GATE*100:.0f}% at {TRADE_SIZE_SOL} SOL")
+    logger.info(f"  Impact gate: RT \u2264 {ROUND_TRIP_GATE*100:.0f}% at {TRADE_SIZE_SOL} SOL")
     logger.info(f"  Pool types: {sorted(CPMM_VALID_DEX_IDS)}")
     logger.info(f"  Quote filter: SOL/wSOL only")
     logger.info("=" * 65)

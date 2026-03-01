@@ -466,10 +466,18 @@ def poll_and_log():
         n_missing = n_elig - n_covered
         coverage_pct = round(100 * n_covered / n_elig, 1) if n_elig > 0 else 0.0
         rv_summary = f"rv_5m_median={rv_med:.4f}%" if rv_med else "rv_5m=warming_up"
+        # Venue breakdown for covered mints
+        venue_covered: dict[str, int] = {}
+        for mint, _, _, venue_db in eligible:
+            if mint in covered_mints:
+                v = venue_db or "unknown"
+                venue_covered[v] = venue_covered.get(v, 0) + 1
+        venue_str = "  ".join(f"{v}={n}" for v, n in sorted(venue_covered.items(), key=lambda x: -x[1]))
         logger.info(
-            f"Logged {n_covered}/{n_elig} eligible mints "
+            f"Logged {n_covered}/{n_elig} eligible_cpamm_valid mints "
             f"(coverage={coverage_pct}% missing={n_missing}) | "
-            f"lp_removal={n_lp} | spam={n_spam} | pumpfun_origin={n_pf} | {rv_summary}"
+            f"lp_removal={n_lp} | spam={n_spam} | pumpfun_origin={n_pf} | {rv_summary} | "
+            f"venue: {venue_str}"
         )
         if n_missing > 0:
             missing_mints = [m for m, _, _, _ in eligible if m not in covered_mints]
@@ -497,8 +505,17 @@ def poll_and_log():
                 logger.debug(f"micro_missing diagnostic error: {diag_e}")
 
 def run():
+    import hashlib
+    _self_path = os.path.abspath(__file__)
+    try:
+        with open(_self_path, "rb") as _f:
+            _sha256 = hashlib.sha256(_f.read()).hexdigest()[:16]
+    except Exception:
+        _sha256 = "unknown"
     logger.info("=" * 65)
     logger.info("Existing Tokens Microstructure Logger v1.8 starting")
+    logger.info(f"  FILE: {_self_path}")
+    logger.info(f"  SHA256[:16]: {_sha256}")
     logger.info(f"  LP cliff threshold: {LP_CLIFF_THRESHOLD*100:.0f}% k-drop")
     logger.info(f"  Spam threshold: avg_trade_usd < $1")
     logger.info(f"  rv_5m: {RV_5M_POLLS} polls (~{RV_5M_POLLS*POLL_INTERVAL_SEC}s window)")

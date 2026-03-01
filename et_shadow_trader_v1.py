@@ -2791,12 +2791,45 @@ def run():
                 if k != "evaluated":
                     _filter_scan_counts[k] = 0
 
-            # Periodic status log
+            # Periodic status log with set counts and venue breakdown
             if int(now_ts) % 300 < POLL_INTERVAL_SEC:  # ~every 5 min
+                # eligible_snapshot_count: all eligible=1 in latest snapshot
+                try:
+                    _conn_s = get_conn()
+                    _snap_ts = _conn_s.execute("SELECT MAX(snapshot_at) FROM universe_snapshot").fetchone()[0]
+                    _elig_snap = _conn_s.execute(
+                        "SELECT COUNT(*) FROM universe_snapshot WHERE snapshot_at=? AND eligible=1",
+                        (_snap_ts,)
+                    ).fetchone()[0]
+                    _elig_cpamm = _conn_s.execute(
+                        "SELECT COUNT(*) FROM universe_snapshot WHERE snapshot_at=? AND eligible=1 AND cpamm_valid_flag=1",
+                        (_snap_ts,)
+                    ).fetchone()[0]
+                    _cutoff5 = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+                    _micro5 = _conn_s.execute(
+                        "SELECT COUNT(DISTINCT mint_address) FROM microstructure_log WHERE logged_at >= ?",
+                        (_cutoff5,)
+                    ).fetchone()[0]
+                    # Venue breakdown for eligible_snapshot
+                    _venue_rows = _conn_s.execute(
+                        "SELECT venue, COUNT(*) as n FROM universe_snapshot "
+                        "WHERE snapshot_at=? AND eligible=1 GROUP BY venue ORDER BY n DESC",
+                        (_snap_ts,)
+                    ).fetchall()
+                    _venue_str = "  ".join(f"{r[0] or 'unk'}={r[1]}" for r in _venue_rows)
+                    _conn_s.close()
+                except Exception:
+                    _elig_snap = _elig_cpamm = _micro5 = "?"
+                    _venue_str = "?"
                 logger.info(
-                    f"STATUS: strict_universe={len(strict_rows)} all_eligible={len(all_rows)} "
+                    f"STATUS: eligible_snapshot={_elig_snap} "
+                    f"eligible_snapshot_cpamm_valid={_elig_cpamm} "
+                    f"micro_recent_5m={_micro5} "
+                    f"strategy_candidates(all_eligible)={len(all_rows)} "
+                    f"tradeable_set=see_tick_log "
                     f"open_trades={len(get_open_trades())} "
-                    f"jup_api={'OK' if _jupiter_api_available else 'FALLBACK'}"
+                    f"jup_api={'OK' if _jupiter_api_available else 'FALLBACK'} "
+                    f"venue: {_venue_str}"
                 )
 
         except Exception as e:
