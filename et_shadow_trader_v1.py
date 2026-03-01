@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.23
+""""et_shadow_trader_v1.py — ET v1 Paper Trading Harness (Playbook Edition) v1.24
+
+v1.24 additions (2026-03-01):
+  - BUG FIX (P0): UnboundLocalError in diagnostic logging when |E|=1.
+    _best_diag_for_best() was defined at line ~1795 but called at line ~1774
+    (inside the |E|<2 branch). Python closures require the def to appear
+    BEFORE any call site in the same scope. Fix: move definition to before
+    the if tradeable_set: block so it is available in all branches.
+    No strategy logic changed — diagnostic-only fix.
+    Affected path: tradeable_set has exactly 1 token (|E|=1 fires).
 
 v1.23 additions (2026-02-28):
   - Liq gate relaxed: LANE_GATE_MIN_LIQ_USD $50k -> $25k (single controlled change).
@@ -1694,6 +1703,14 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
     _log_pf_stability_counterfactual(eligible_rows, score_fn)
 
     # ── Log diagnostics ────────────────────────────────────────────────────────
+    # ── Best-token diagnostic helper (defined here so it is available in all
+    #    branches below: |E|=0, |E|=1, and |E|>=2 opened=0 ticks) ─────────────
+    def _best_diag_for_best(b_row, b_score):
+        """Return (token, score, block_reason) for the top candidate."""
+        tok = b_row.get("token_symbol", "?") if b_row else None
+        sc  = b_score
+        ok, blk = _check_tradeable(b_row) if b_row else (True, None)
+        return tok, sc, (None if ok else blk)
     if tradeable_set:
         scored = [(score_fn(r), r) for r in tradeable_set]
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -1789,15 +1806,6 @@ def maybe_fire_rank_entry(strategy: str, all_rows: list[dict], score_fn) -> str 
         f"score={best_score:.4f} r_m5={best.get('r_m5') or 0:.2f}% "
         f"lane={classify_lane(best)} | baseline={baseline_row.get('token_symbol','?')}"
     )
-
-    # ── Compute best-token diagnostics for all opened=0 ticks ─────────────────
-    # (best scoring eligible token and its first failing gate — for logging only)
-    def _best_diag_for_best(b_row, b_score):
-        """Return (token, score, block_reason) for the top candidate."""
-        tok = b_row.get("token_symbol", "?") if b_row else None
-        sc  = b_score
-        ok, blk = _check_tradeable(b_row) if b_row else (True, None)
-        return tok, sc, (None if ok else blk)
 
     # ── MIN_SCORE_TO_TRADE gate (feature-flag, default None = OFF) ─────────────
     if MIN_SCORE_TO_TRADE is not None and best_score < MIN_SCORE_TO_TRADE:
@@ -2218,7 +2226,7 @@ def _register_run():
     })
     lane_gates = (f"pumpfun_early=BLOCKED pumpfun_mature=rv5m<={PF_MATURE_RV5M_MAX}% "
                   f"mature_pumpswap=rv5m<={PF_MATURE_RV5M_MAX}% "
-                  f"non_pumpfun_mature=BLOCKED_v1.23 large_cap_ray=BLOCKED_v1.23 "
+                  f"non_pumpfun_mature=BLOCKED_v1.24 large_cap_ray=BLOCKED_v1.24 "
                   f"allowed_lanes={sorted(ALLOWED_LANES) if ALLOWED_LANES else 'ALL'} "
                   f"age_h>={LANE_GATE_MIN_AGE_H} "
                   f"liq>={LANE_GATE_MIN_LIQ_USD} vol_h1>={LANE_GATE_MIN_VOL_H1}")
@@ -2230,10 +2238,10 @@ def _register_run():
             INSERT OR IGNORE INTO run_registry
             (run_id, git_commit, start_ts, mode, version, lane_gates, key_params, signature)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.23", lane_gates, key_params, sig))
+        """, (_RUN_ID, _GIT_COMMIT, _dt.utcnow().isoformat(), MODE, "v1.24", lane_gates, key_params, sig))
         conn.commit()
         conn.close()
-        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.23 mode={MODE} signature={sig}")
+        logger.info(f"RUN_REGISTRY: registered run_id={_RUN_ID[:8]} version=v1.24 mode={MODE} signature={sig}")
     except Exception as e:
         logger.error(f"run_registry insert failed: {e}")
 
