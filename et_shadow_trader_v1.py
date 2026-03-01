@@ -208,7 +208,7 @@ import sqlite3
 import time
 import uuid
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ── SINGLETON GUARD ──────────────────────────────────────────────────────────
 _LOCK_PATH = "/tmp/et_shadow_trader_v1.lock"
@@ -2479,11 +2479,12 @@ def force_close_paired_baseline(strategy_trade_id: str, current_prices: dict):
     current_prices: dict of mint_address -> price dict (from last fetch_current_price calls)
     """
     conn = get_conn()
-    rows = conn.execute("""
+    cur = conn.execute("""
         SELECT * FROM shadow_trades_v1
         WHERE baseline_trigger_id = ? AND status = 'open'
-    """, (strategy_trade_id,)).fetchall()
-    cols = [d[0] for d in conn.description]
+    """, (strategy_trade_id,))
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
     conn.close()
     for row in rows:
         baseline_trade = dict(zip(cols, row))
