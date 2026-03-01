@@ -11,7 +11,7 @@ LOGS_DIR = os.path.join(BASE_DIR, "logs")
 DB_PATH  = os.path.join(DATA_DIR, "solana_trader.db")
 
 # ── PumpPortal WebSocket ─────────────────────────────────────────────────────
-PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
+PUMPPORTAL_WS_URL = "<REDACTED_WSS>/api/data"
 
 # ── Narrative Matching ───────────────────────────────────────────────────────
 MIN_MATCH_SCORE        = 60      # Minimum score to consider a narrative match
@@ -127,11 +127,21 @@ DASHBOARD_PORT = 5050
 DASHBOARD_HOST = "0.0.0.0"
 
 # Jupiter API
-JUPITER_API_KEY = "REDACTED_JUPITER_API_KEY"
-JUPITER_BASE_URL = "https://api.jup.ag"
+JUPITER_API_KEY = _os.getenv("JUPITER_API_KEY")
+JUPITER_BASE_URL = "https://<REDACTED_JUP>"
 
 # ── Live Trading Credentials (loaded from environment) ──────────────────────
 import os as _os
-RPC_URL             = _os.getenv('HELIUS_RPC_URL', 'https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY')
-WALLET_PRIVATE_KEY  = _os.getenv('WALLET_PRIVATE_KEY', 'REDACTED_SOLANA_PRIVATE_KEY')
-WALLET_PUBKEY       = _os.getenv('WALLET_PUBKEY', 'REDACTED_WALLET_ADDRESS')
+
+def _validate_env_vars():
+    # These are only required for live trading, not for reporting/analysis
+    if _os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true":
+        required = ["JUPITER_API_KEY", "HELIUS_RPC_URL", "WALLET_PRIVATE_KEY"]
+        missing = [v for v in required if not _os.getenv(v)]
+        if missing:
+            raise ValueError(f"Missing required environment variables for live trading: {', '.join(missing)}")
+
+_validate_env_vars()
+RPC_URL             = _os.getenv("HELIUS_RPC_URL")
+WALLET_PRIVATE_KEY  = _os.getenv("WALLET_PRIVATE_KEY")
+WALLET_PUBKEY       = _os.getenv('WALLET_PUBKEY', '<REDACTED_WALLET_PUBKEY>')

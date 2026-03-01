@@ -19,12 +19,12 @@ DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search/"
 DEXSCREENER_NEW_PAIRS_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 
 # PumpPortal for graduation events
-PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
+PUMPPORTAL_WS_URL = "<REDACTED_WSS>/api/data"
 
 # Helius RPC for holder data
 HELIUS_RPC_URL = os.environ.get(
     "HELIUS_RPC_URL",
-    "https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY"
+    "https://mainnet.<REDACTED_HELIUS>/?api-key=<REDACTED>"
 )
 
 # ── Discovery Filters ────────────────────────────────────────────────────────

@@ -69,7 +69,7 @@ def main():
 
     print(f"\n4. Connecting to PumpPortal to find a fresh token...")
     wsapp = ws.WebSocketApp(
-        "wss://pumpportal.fun/api/data",
+        "<REDACTED_WSS>/api/data",
         on_message=on_message,
         on_open=on_open,
     )

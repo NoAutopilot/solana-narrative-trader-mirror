@@ -1114,7 +1114,7 @@ def _check_jup_health():
     try:
         r = requests.get(
             f"{JUPITER_BASE_URL}/ultra/v1/order",
-            headers={"x-api-key": JUPITER_API_KEY},
+            headers={"x-api-key": "<REDACTED>"},
             params={"inputMint": WSOL_MINT,
                     "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                     "amount": "1000000"},
@@ -1160,9 +1160,9 @@ def get_mint_decimals(mint: str) -> int | None:
     # Option A: Jupiter Tokens V2 search (lite-api, no auth required but key accepted)
     try:
         r = requests.get(
-            "https://lite-api.jup.ag/tokens/v2/search",
+            "https://lite-<REDACTED_JUP>/tokens/v2/search",
             params={"query": mint},
-            headers={"x-api-key": JUPITER_API_KEY},
+            headers={"x-api-key": "<REDACTED>"},
             timeout=5,
         )
         if r.status_code == 200:
@@ -1181,7 +1181,7 @@ def get_mint_decimals(mint: str) -> int | None:
 
     # Option B: Solana RPC getTokenSupply (Helius if configured, else public mainnet)
     try:
-        rpc_url = RPC_URL or "https://api.mainnet-beta.solana.com"
+        rpc_url = RPC_URL or "https://api.<REDACTED_SOLANA>"
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
         r = requests.post(rpc_url, json=payload, timeout=5)
         if r.status_code == 200:
@@ -1223,7 +1223,7 @@ def get_jupiter_rt_estimate(
         try:
             r = requests.get(
                 f"{JUPITER_BASE_URL}/ultra/v1/order",
-                headers={"x-api-key": JUPITER_API_KEY},
+                headers={"x-api-key": "<REDACTED>"},
                 params={
                     "inputMint":  WSOL_MINT,
                     "outputMint": mint,

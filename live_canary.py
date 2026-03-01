@@ -246,8 +246,8 @@ def get_deepest_cpamm_pair() -> Optional[dict]:
 
 
 # ─── JUPITER SWAP ─────────────────────────────────────────────────────────────
-JUP_API_KEY = "REDACTED_JUPITER_API_KEY"
-JUP_BASE    = "https://api.jup.ag"
+JUP_API_KEY = "<REDACTED_JUP_KEY>"
+JUP_BASE    = "https://<REDACTED_JUP>"
 WSOL_MINT   = "So11111111111111111111111111111111111111112"
 
 

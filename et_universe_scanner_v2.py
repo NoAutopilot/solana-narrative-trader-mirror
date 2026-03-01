@@ -9,7 +9,7 @@ Patches applied:
   Fix 4: SOL/wSOL quote token filter
   Fix 5: buy_count_ratio (not "imbalance"), avg_trade_usd, spam heuristics
   Fix 6: Deterministic candidate discovery rule + discovery_log table
-  Fix 7: Jupiter quote path restored (api.jup.ag/swap/v1/quote) for validation
+  Fix 7: Jupiter quote path restored (<REDACTED_JUP>/swap/v1/quote) for validation
 
 Discovery rule (deterministic, logged):
   Source: DexScreener /latest/dex/search?q=SOL (top-volume Solana pairs)
@@ -86,7 +86,7 @@ if not logger.handlers:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEXSCREENER_BASE    = "https://api.dexscreener.com"
-JUPITER_QUOTE_URL   = "https://api.jup.ag/swap/v1/quote"
+JUPITER_QUOTE_URL   = "https://<REDACTED_JUP>/swap/v1/quote"
 WSOL_MINT           = "So11111111111111111111111111111111111111112"
 DEXSCREENER_TIMEOUT = 12
 JUPITER_TIMEOUT     = 8
@@ -444,7 +444,7 @@ def check_jupiter_available() -> bool:
         )
         _jup_available = r.status_code == 200
         if _jup_available:
-            logger.info("Jupiter quote API available at api.jup.ag/swap/v1/quote")
+            logger.info("Jupiter quote API available at <REDACTED_JUP>/swap/v1/quote")
         else:
             logger.warning(f"Jupiter quote API returned {r.status_code} — CPAMM-only mode")
     except Exception as e:

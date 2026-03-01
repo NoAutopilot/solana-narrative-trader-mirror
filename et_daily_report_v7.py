@@ -38,7 +38,7 @@ TP_THRESHOLD_PCT        =  0.04   # +4% TP
 TRADE_SIZE_SOL          = 0.01
 LAMPORTS_PER_SOL        = 1_000_000_000
 DEX_FEE_RT_PCT          = 0.50
-SOLANA_RPC              = "https://api.mainnet-beta.solana.com"
+SOLANA_RPC              = "https://api.<REDACTED_SOLANA>"
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def pct(v, decimals=3):

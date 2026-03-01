@@ -37,7 +37,7 @@ logger = logging.getLogger("live_executor")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 PUMPPORTAL_API_KEY = os.getenv("PUMPPORTAL_API_KEY", "")
-PUMPPORTAL_TRADE_URL = "https://pumpportal.fun/api/trade"
+PUMPPORTAL_TRADE_URL = "https://<REDACTED_PUMP>/api/trade"
 HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "")
 

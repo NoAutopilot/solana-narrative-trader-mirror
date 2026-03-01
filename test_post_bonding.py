@@ -37,7 +37,7 @@ payload = {
 payload["api-key"] = api_key
 
 resp = requests.post(
-    "https://pumpportal.fun/api/trade",
+    "https://<REDACTED_PUMP>/api/trade",
     headers={"Content-Type": "application/json"},
     json=payload,
     timeout=30
@@ -65,7 +65,7 @@ if resp.status_code == 200:
         "api-key": api_key
     }
     sell_resp = requests.post(
-        "https://pumpportal.fun/api/trade",
+        "https://<REDACTED_PUMP>/api/trade",
         headers={"Content-Type": "application/json"},
         json=sell_payload,
         timeout=30

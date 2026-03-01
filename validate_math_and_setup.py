@@ -215,8 +215,8 @@ print("6. WALLET STATUS")
 print("=" * 70)
 
 try:
-    rpc_url = 'https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY'
-    wallet = 'REDACTED_WALLET_ADDRESS'
+    rpc_url = 'https://mainnet.<REDACTED_HELIUS>/?api-key=<REDACTED>'
+    wallet = '<REDACTED_WALLET_PUBKEY>'
     resp = requests.post(rpc_url, json={
         'jsonrpc': '2.0', 'id': 1,
         'method': 'getBalance',

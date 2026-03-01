@@ -13,7 +13,7 @@ from solders.transaction import VersionedTransaction
 LAMPORTS_PER_SOL = 1_000_000_000
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
-JUP_BASE = "https://api.jup.ag"
+JUP_BASE = "https://<REDACTED_JUP>"
 
 raw = base58.b58decode(WALLET_PRIVATE_KEY)
 keypair = Keypair.from_bytes(raw)
