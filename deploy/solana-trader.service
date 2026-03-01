@@ -1,0 +1,21 @@
+[Unit]
+Description=Solana Narrative Trader (Paper Trading)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/solana_trader
+
+# All secrets loaded from this file — never hardcode in source.
+# Copy .env.example to this path and fill in real values.
+EnvironmentFile=/root/solana_trader/trader_env.conf
+
+ExecStart=/usr/bin/python3 /root/solana_trader/supervisor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
