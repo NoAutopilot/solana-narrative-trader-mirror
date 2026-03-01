@@ -87,93 +87,89 @@ Based on this analysis, the following recommendations are proposed:
 
 By implementing the recommended change to the `lane_age` gate, we expect to see a significant improvement in the `tradeable>=2` rate and the overall performance of the trading bot.
 
+## 5. Universe Coverage Analysis (Section 6 - REVISED)
 
-## 5. Universe Coverage Analysis (Section 6)
+This revised analysis addresses the circular logic in the previous version by using an **independent benchmark** derived from a one-off, broad DexScreener query, rather than the production `universe_snapshot` itself. This allows for a more accurate assessment of upstream feed coverage and downstream strategy concentration.
 
-This section addresses whether the production feed provides a representative view of the broader Solana token universe or if it is narrowly focused on a specific segment, such as Pump.fun.
+### Short Answer & Conclusions
 
-### Short Answer
+*   **Previous analysis was flawed:** The original Section 6 proved high internal retention but did not prove broad-market listening due to its circular benchmark.
+*   **Upstream Feed is NARROW (FAIL):** With an independent benchmark, the production feed's coverage is only **33%**. It is missing a significant portion of the eligible market, particularly on non-PumpSwap venues. The scanner is not listening as broadly as it could be.
+*   **Downstream Strategy is NARROW (FAIL):** The strategy funnel remains heavily concentrated on Pump.fun-originated tokens. The final `tradeable_set` is 86% `pumpfun_origin=1`, and 100% of tradeable tokens are on the `pumpswap` venue. This is due to explicit `lane_not_allowed` policy, not a data gap.
+*   **Market Context is Key:** The independent benchmark itself is **86% `pumpfun_origin=1`**. The high-volume, liquid, and aged Solana token market is, at this moment, dominated by Pump.fun graduates. While our feed coverage is low, the market we *are* missing is also mostly Pump.fun tokens.
 
-**Reasonably Broad.** The analysis shows that while Pump.fun-originated tokens are a significant part of the ecosystem, the production scanner is successfully listening to and evaluating tokens from major non-Pump.fun venues like Raydium, Orca, and Meteora. The current market conditions, filtered by our economic gates, show a concentration of activity on PumpSwap, but the system is not blind to other venues.
+### A. Independent Benchmark
 
-### A. Broad Benchmark
+A benchmark was created by running the production scanner's full multi-query sweep against the live DexScreener API. This set is independent of the `universe_snapshot` table.
 
-A benchmark was created using all tokens observed in the last two hours that pass the production economic gates (`liq >= $25k`, `vol_h1 >= $10k`, `age >= 24h`).
+*   **Benchmark Distinct Mints (Production Gates):** 21
 
--   **Benchmark Distinct Mints:** 14
+| Category      | Group                | Mints | Percent | Notes                                    |
+| :------------ | :------------------- | ----: | :------ | :--------------------------------------- |
+| **By Venue**  | pumpswap             |    16 | 76.2%   | Market is heavily concentrated here      |
+|               | meteora              |     3 | 14.3%   |                                          |
+|               | raydium              |     2 | 9.5%    |                                          |
+| **By Origin** | `pumpfun_origin=1`   |    18 | 85.7%   | The eligible market is mostly Pump.fun   |
+|               | `pumpfun_origin=0`   |     3 | 14.3%   |                                          |
+| **By Lane**   | `pumpfun_mature`     |    18 | 85.7%   |                                          |
+|               | `non_pumpfun_mature` |     3 | 14.3%   |                                          |
 
-| Category         | Group              | Mints | Percent | Notes                                    |
-| :--------------- | :----------------- | ----: | :------ | :--------------------------------------- |
-| **By Venue**     | pumpswap           |     6 | 42.9%   | Highest concentration of eligible tokens |
-|                  | orca               |     5 | 35.7%   | Strong representation                    |
-|                  | raydium            |     2 | 14.3%   | Present                                  |
-|                  | meteora            |     1 | 7.1%    | Present                                  |
-| **By Origin**    | `pumpfun_origin=0` |     9 | 64.3%   | Majority are non-Pump.fun native       |
-|                  | `pumpfun_origin=1` |     5 | 35.7%   | Significant minority                     |
-| **By Lane**      | `large_cap_ray`    |     8 | 57.1%   | Dominated by older, established tokens   |
-|                  | `pumpfun_mature`   |     5 | 35.7%   |                                          |
-|                  | `mature_pumpswap`  |     1 | 7.1%    |                                          |
+### B. Production Coverage vs. Independent Benchmark (Upstream)
 
-### B. Production Feed Coverage vs. Benchmark
+This section answers: **Are we listening broadly upstream?**
 
-The production feed (`eligible=1`) was compared against the benchmark.
+*   **Overall Coverage:** **33.3%** (7 of 21 benchmark mints are in the production feed)
 
--   **Overall Coverage:** **92.9%** (13 of 14 benchmark mints are in the production feed)
+| Coverage By | Group                | Production | Benchmark | Overlap | Coverage | Verdict |
+| :---------- | :------------------- | ---------: | --------: | ------: | -------: | :------ |
+| **Venue**   | pumpswap             |          7 |        16 |       7 |    43.8% | **FAIL** |
+|             | meteora              |          1 |         3 |       0 |     0.0% | **FAIL** |
+|             | raydium              |          3 |         2 |       0 |     0.0% | **FAIL** |
+|             | orca                 |          5 |         0 |       0 |      N/A | N/A     |
+| **Origin**  | `pumpfun_origin=1`   |          6 |        18 |       6 |    33.3% | **FAIL** |
+|             | `pumpfun_origin=0`   |         10 |         3 |       0 |     0.0% | **FAIL** |
 
-| Coverage By | Group              | Production | Benchmark | Overlap | Coverage | Notes                                  |
-| :---------- | :----------------- | ---------: | --------: | ------: | -------: | :------------------------------------- |
-| **Venue**   | meteora            |          1 |         1 |       1 |   100.0% | Perfect coverage                       |
-|             | orca               |          4 |         5 |       4 |    80.0% | Excellent coverage                     |
-|             | pumpswap           |          6 |         6 |       6 |   100.0% | Perfect coverage                       |
-|             | raydium            |          2 |         2 |       2 |   100.0% | Perfect coverage                       |
-| **Origin**  | `pumpfun_origin=1` |          5 |         5 |       5 |   100.0% | Perfect coverage                       |
-|             | `pumpfun_origin=0` |          8 |         9 |       8 |    88.9% | Excellent coverage                     |
-| **Lane**    | `large_cap_ray`    |          7 |         8 |       7 |    87.5% | Excellent coverage                     |
-|             | `pumpfun_mature`   |          5 |         5 |       5 |   100.0% | Perfect coverage                       |
-|             | `mature_pumpswap`  |          1 |         1 |       1 |   100.0% | Perfect coverage                       |
+**Missing Mints:** The production feed is missing 14 tokens from the independent benchmark, including high-volume tokens on Meteora and Raydium. The top missing token is `BULl` on Meteora with over $1M in 1-hour volume.
 
-**Missing Mints:** The only benchmark mint missing from the production feed was `ORCA` on the Orca venue.
+### C. Downstream Concentration
 
-### C. Funnel Composition
-
-This analysis tracks the composition of tokens as they move through the strategy's filtering stages.
+This section answers: **Are we acting broadly downstream?**
 
 | Stage                               | Mints | % of Raw | `pumpfun=1` | `pumpfun=0` | Top Venue(s)        |
 | :---------------------------------- | ----: | -------: | ----------: | ----------: | :------------------ |
-| 1. Raw Discovered (in snapshot)     |    34 |     100% |         50% |         50% | pumpswap:18, raydium:9 |
-| 4. Eligible (`eligible=1`)          |    32 |      94% |         50% |         50% | pumpswap:17, raydium:9 |
-| 5. CPAMM Valid                      |    25 |      74% |         64% |         36% | pumpswap:17, raydium:7 |
-| 7. Strategy Candidates (econ gates) |     8 |      24% |         62% |         38% | pumpswap:6, orca:1     |
-| 8. Tradeable Set (allowed lanes)    |     6 |      18% |         83% |         17% | pumpswap:6             |
+| 1. Raw Snapshot (All)               |    33 |     100% |         48% |         52% | pumpswap:17, raydium:9 |
+| 2. `eligible=1`                     |    33 |     100% |         48% |         52% | pumpswap:17, raydium:9 |
+| 3. `cpamm_valid`                    |    24 |      73% |         67% |         33% | pumpswap:17, raydium:7 |
+| 4. `micro_recent_2m`                |    24 |      73% |         67% |         33% | pumpswap:17, raydium:7 |
+| 5. Strategy Candidates (Econ Gates) |     8 |      24% |         75% |         25% | pumpswap:7, raydium:1  |
+| 6. Tradeable Set (Allowed Lanes)    |     7 |      21% |         86% |         14% | pumpswap:7             |
 
-**Key Observation:** The funnel starts broad (50/50 pumpfun vs. non-pumpfun) but narrows significantly at the final `tradeable_set` stage to be almost exclusively Pump.fun-related tokens that pass the strict economic and lane gates.
+**Conclusion:** The funnel starts diverse but narrows to be almost exclusively Pump.fun-related by the final stage due to the `lane_not_allowed` policy.
 
-### D. Top-Candidate Source Analysis
+### D. Unknown Source Attribution
 
-Over the last 100 strategy ticks, the 
-`best_candidate` (the top-ranked token before final gate checks) was analyzed.
+The analysis of the `best_candidate` was improved by looking up historical data in `microstructure_log`.
 
--   **Ticks with a `best_candidate`:** 94 out of 100
+*   **Unknown Attribution:** **0%** (94 of 94 ticks with a `best_candidate` were successfully attributed)
 
-| Best Candidate By | Group              | Ticks | Percent | Notes                               |
-| :---------------- | :----------------- | ----: | :------ | :---------------------------------- |
-| **Venue**         | unknown            |    40 | 43%     | Symbol not found in latest snapshot |
-|                   | pumpswap           |    33 | 35%     |                                     |
-|                   | raydium            |    18 | 19%     |                                     |
-|                   | meteora            |     3 | 3%      |                                     |
-| **Origin**        | unknown            |    40 | 43%     |                                     |
-|                   | `pumpfun_origin=1` |    31 | 33%     |                                     |
-|                   | `pumpfun_origin=0` |    23 | 24%     |                                     |
-| **Block Reason**  | `pf_stability`     |    31 | 33%     | Volatility is a major blocker       |
-|                   | `lane_not_allowed` |    28 | 30%     | `large_cap_ray` is not an allowed lane |
-|                   | `lane_vol`         |    12 | 13%     |                                     |
-|                   | `lane_liq`         |    11 | 12%     |                                     |
-|                   | `tradeable`        |     8 | 9%      | Passed all gates                    |
+| Best Candidate By | Group                          | Ticks | Percent |
+| :---------------- | :----------------------------- | ----: | :------ |
+| **Venue**         | pumpswap                       |    63 | 67%     |
+|                   | raydium                        |    26 | 28%     |
+|                   | meteora                        |     5 | 5%      |
+| **Origin**        | `pumpfun_origin=1`             |    63 | 67%     |
+|                   | `pumpfun_origin=0`             |    31 | 33%     |
+| **Block Reason**  | `pf_stability`                 |    31 | 33%     |
+|                   | `lane_not_allowed`             |    29 | 31%     |
+|                   | `lane_vol`                     |    12 | 13%     |
 
 ### E. Pass/Fail Decision Rule
 
--   **Condition 1 (Overall Coverage >= 70%):** 92.9% -> **PASS**
--   **Condition 2 (No Venue < 50% Coverage):** min 80.0% -> **PASS**
--   **Condition 3 (Non-Pumpfun Visible):** 50.0% -> **PASS**
+| Condition                             | Result  | Verdict |
+| :------------------------------------ | :------ | :------ |
+| 1. Independent Benchmark              | Yes     | **PASS** |
+| 2. Overall Coverage >= 70%            | 33.3%   | **FAIL** |
+| 3. No Major Venue < 50% Coverage      | 0.0%    | **FAIL** |
+| 4. Unknown Attribution < 5%           | 0.0%    | **PASS** |
 
-**Verdict: PASS.** The production feed is successfully listening to the bulk of the Solana token universe as defined by our benchmark criteria.
+**Overall Verdict:** **FAIL.** The production feed is a narrow slice of the market and does not provide broad coverage. Results should not be generalized.
