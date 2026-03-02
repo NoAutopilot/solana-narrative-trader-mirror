@@ -9,14 +9,29 @@ Hypothesis:
   large_cap_ray continuation (r_m5 > 0) beats matched large_cap_ray controls
   on executable net forward markout at +5m using Jupiter quotes.
 
-Preregistered rules:
+Preregistered rules (FROZEN — do not modify):
   - Signal:  top-1 candidate per fire with MAX(entry_r_m5), lane=large_cap_ray, r_m5>0
   - Control: nearest match from same fire with r_m5<=0, deterministic distance metric
   - Horizons: +1m, +5m, +15m, +30m
-  - Quote source: Jupiter lite-api, fixed 0.01 SOL notional, slippageBps=50
+  - Quote source: Jupiter Ultra API, fixed 0.01 SOL notional, slippageBps=50
   - Primary metric: mean signal-minus-control net_fee100 at +5m
 
-DO NOT MODIFY THIS FILE'S LOGIC. It is a frozen preregistered observer.
+Eval rules (FROZEN — do not modify):
+  - Data-quality checks run after 24h:
+      quote coverage per horizon >= 95%
+      density >= 5 signals/day
+    If these fail → stop and fix infra (NOT strategy).
+  - Hypothesis verdict evaluated ONLY after n >= 50 signals (minimum n >= 30):
+      Primary:  mean(signal-control) net markout at +5m
+      Report:   mean, median, % > 0, 95% CI (bootstrap)
+  - Do NOT stop early based on n < 30 performance.
+  - Do NOT tune gates, thresholds, or control-matching weights.
+
+Patch log:
+  v1.0 — initial deployment
+  v1.1 — (A) read-only safety guard: reject Ultra responses containing 'transaction'/'tx' keys
+          (B) persist quote timestamps (entry_quote_ts_epoch, fwd_quote_ts_epoch_*, fwd_due_epoch_*, fwd_exec_epoch_*)
+          (C) eval rules documented in header; jitter logged per forward quote
 """
 
 import sqlite3
@@ -41,13 +56,20 @@ FIXED_NOTIONAL_SOL  = 0.01
 LAMPORTS_IN         = 10_000_000   # 0.01 SOL in lamports
 WSOL_MINT           = "So11111111111111111111111111111111111111112"
 SLIPPAGE_BPS        = 50
-JUP_ULTRA_URL       = "https://api.jup.ag/ultra/v1/order"
+# Quote endpoint: use lite-api /quote (no transaction in response) with API key for higher rate limits
+# Ultra /order always returns a 'transaction' key (value=None without taker), so we use lite-api instead
+JUP_QUOTE_URL       = "https://lite-api.jup.ag/swap/v1/quote"
 JUP_TIMEOUT_SEC     = 10
 JUP_RETRY_DELAYS    = [2, 5, 10]  # seconds between retries on transient errors
-JUP_API_KEY         = os.environ.get("JUPITER_API_KEY", "")  # required for Ultra API
+JUP_API_KEY         = os.environ.get("JUPITER_API_KEY", "")  # used as x-api-key for higher rate limits
 FEE_RATE            = 0.01         # 1% fee for net_fee100 calculation
 HORIZONS            = [60, 300, 900, 1800]   # +1m, +5m, +15m, +30m in seconds
 HORIZON_LABELS      = ["1m", "5m", "15m", "30m"]
+
+# (A) READ-ONLY SAFETY: if any of these keys appear in a response with a non-None value, reject it.
+# Note: lite-api /quote does NOT return transaction keys at all.
+# Ultra /order returns 'transaction': None (no taker) — we check value not just presence.
+_TX_KEYS = {"transaction", "tx", "signedTransaction", "serializedTransaction"}
 
 # Lane classification constants (must match et_shadow_trader_lcr.py exactly)
 LCR_MIN_AGE_H       = 24 * 30     # 30 days in hours
@@ -88,70 +110,87 @@ log = logging.getLogger(VERSION)
 
 # ── RUN ID ───────────────────────────────────────────────────────────────────
 RUN_ID = str(uuid.uuid4())
-log.info(f"=== {VERSION} starting | run_id={RUN_ID} ===")
+log.info(f"=== {VERSION} v1.1 starting | run_id={RUN_ID} ===")
 log.info(f"DB_PATH={DB_PATH}  OBS_DB_PATH={OBS_DB_PATH}")
 log.info(f"Fixed notional: {FIXED_NOTIONAL_SOL} SOL ({LAMPORTS_IN} lamports) | slippageBps={SLIPPAGE_BPS}")
+log.info(f"Read-only safety guard: reject responses where any of {_TX_KEYS} has non-None value")
+log.info(f"Quote endpoint: {JUP_QUOTE_URL} | auth={'key_set' if JUP_API_KEY else 'no_key'}")
 
 # ── OBSERVER DB SETUP ─────────────────────────────────────────────────────────
 def init_observer_db():
     con = sqlite3.connect(OBS_DB_PATH)
     cur = con.cursor()
+
+    # Create table if it doesn't exist (full schema including new timestamp columns)
     cur.executescript("""
     CREATE TABLE IF NOT EXISTS observer_lcr_cont_v1 (
-        candidate_id            TEXT    PRIMARY KEY,
-        run_id                  TEXT    NOT NULL,
-        signal_fire_id          TEXT    NOT NULL,
-        candidate_type          TEXT    NOT NULL,   -- 'signal' or 'control'
-        control_for_signal_id   TEXT,               -- NULL for signal rows
-        fire_time_epoch         INTEGER NOT NULL,
-        fire_time_iso           TEXT    NOT NULL,
-        snapshot_at_iso         TEXT,
-        mint                    TEXT    NOT NULL,
-        symbol                  TEXT,
-        lane                    TEXT,
-        venue                   TEXT,
-        venue_family            TEXT,
-        pumpfun_origin          INTEGER,
-        age_seconds             REAL,
-        age_bucket              TEXT,
-        liquidity_usd           REAL,
-        liquidity_bucket        TEXT,
-        entry_vol_h1            REAL,
-        vol_h1_bucket           TEXT,
-        entry_r_m5              REAL,
-        entry_rv5m              REAL,
-        entry_range_5m          REAL,
-        control_match_distance  REAL,
-        quote_source            TEXT    DEFAULT 'Jupiter',
-        fixed_notional_sol      REAL    DEFAULT 0.01,
-        slippage_bps            INTEGER DEFAULT 50,
-        entry_quote_ok          INTEGER,
-        entry_out_amount_raw    INTEGER,
-        entry_price_ref         REAL,
-        entry_price_impact_pct  REAL,
-        entry_quote_err         TEXT,
-        fwd_quote_ok_1m         INTEGER,
-        fwd_sol_out_lamports_1m INTEGER,
-        fwd_gross_markout_1m    REAL,
-        fwd_net_fee100_1m       REAL,
-        fwd_quote_err_1m        TEXT,
-        fwd_quote_ok_5m         INTEGER,
-        fwd_sol_out_lamports_5m INTEGER,
-        fwd_gross_markout_5m    REAL,
-        fwd_net_fee100_5m       REAL,
-        fwd_quote_err_5m        TEXT,
-        fwd_quote_ok_15m        INTEGER,
-        fwd_sol_out_lamports_15m INTEGER,
-        fwd_gross_markout_15m   REAL,
-        fwd_net_fee100_15m      REAL,
-        fwd_quote_err_15m       TEXT,
-        fwd_quote_ok_30m        INTEGER,
-        fwd_sol_out_lamports_30m INTEGER,
-        fwd_gross_markout_30m   REAL,
-        fwd_net_fee100_30m      REAL,
-        fwd_quote_err_30m       TEXT,
-        created_at_iso          TEXT    NOT NULL,
-        updated_at_iso          TEXT    NOT NULL
+        candidate_id                TEXT    PRIMARY KEY,
+        run_id                      TEXT    NOT NULL,
+        signal_fire_id              TEXT    NOT NULL,
+        candidate_type              TEXT    NOT NULL,
+        control_for_signal_id       TEXT,
+        fire_time_epoch             INTEGER NOT NULL,
+        fire_time_iso               TEXT    NOT NULL,
+        snapshot_at_iso             TEXT,
+        mint                        TEXT    NOT NULL,
+        symbol                      TEXT,
+        lane                        TEXT,
+        venue                       TEXT,
+        venue_family                TEXT,
+        pumpfun_origin              INTEGER,
+        age_seconds                 REAL,
+        age_bucket                  TEXT,
+        liquidity_usd               REAL,
+        liquidity_bucket            TEXT,
+        entry_vol_h1                REAL,
+        vol_h1_bucket               TEXT,
+        entry_r_m5                  REAL,
+        entry_rv5m                  REAL,
+        entry_range_5m              REAL,
+        control_match_distance      REAL,
+        quote_source                TEXT    DEFAULT 'Jupiter',
+        fixed_notional_sol          REAL    DEFAULT 0.01,
+        slippage_bps                INTEGER DEFAULT 50,
+        entry_quote_ok              INTEGER,
+        entry_out_amount_raw        INTEGER,
+        entry_price_ref             REAL,
+        entry_price_impact_pct      REAL,
+        entry_quote_err             TEXT,
+        entry_quote_ts_epoch        INTEGER,
+        fwd_quote_ok_1m             INTEGER,
+        fwd_sol_out_lamports_1m     INTEGER,
+        fwd_gross_markout_1m        REAL,
+        fwd_net_fee100_1m           REAL,
+        fwd_quote_err_1m            TEXT,
+        fwd_due_epoch_1m            INTEGER,
+        fwd_exec_epoch_1m           INTEGER,
+        fwd_quote_ts_epoch_1m       INTEGER,
+        fwd_quote_ok_5m             INTEGER,
+        fwd_sol_out_lamports_5m     INTEGER,
+        fwd_gross_markout_5m        REAL,
+        fwd_net_fee100_5m           REAL,
+        fwd_quote_err_5m            TEXT,
+        fwd_due_epoch_5m            INTEGER,
+        fwd_exec_epoch_5m           INTEGER,
+        fwd_quote_ts_epoch_5m       INTEGER,
+        fwd_quote_ok_15m            INTEGER,
+        fwd_sol_out_lamports_15m    INTEGER,
+        fwd_gross_markout_15m       REAL,
+        fwd_net_fee100_15m          REAL,
+        fwd_quote_err_15m           TEXT,
+        fwd_due_epoch_15m           INTEGER,
+        fwd_exec_epoch_15m          INTEGER,
+        fwd_quote_ts_epoch_15m      INTEGER,
+        fwd_quote_ok_30m            INTEGER,
+        fwd_sol_out_lamports_30m    INTEGER,
+        fwd_gross_markout_30m       REAL,
+        fwd_net_fee100_30m          REAL,
+        fwd_quote_err_30m           TEXT,
+        fwd_due_epoch_30m           INTEGER,
+        fwd_exec_epoch_30m          INTEGER,
+        fwd_quote_ts_epoch_30m      INTEGER,
+        created_at_iso              TEXT    NOT NULL,
+        updated_at_iso              TEXT    NOT NULL
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_fire_type
@@ -166,11 +205,36 @@ def init_observer_db():
         signal_fire_id  TEXT    NOT NULL,
         fire_time_epoch INTEGER NOT NULL,
         fire_time_iso   TEXT    NOT NULL,
-        outcome         TEXT    NOT NULL,   -- 'ok', 'no_signal', 'no_control', 'error'
+        outcome         TEXT    NOT NULL,
         note            TEXT,
         created_at_iso  TEXT    NOT NULL
     );
     """)
+
+    # (B) Migration: add new timestamp columns to existing rows via ALTER TABLE
+    # SQLite supports ADD COLUMN; silently ignore if column already exists
+    new_cols = [
+        ("entry_quote_ts_epoch",    "INTEGER"),
+        ("fwd_due_epoch_1m",        "INTEGER"),
+        ("fwd_exec_epoch_1m",       "INTEGER"),
+        ("fwd_quote_ts_epoch_1m",   "INTEGER"),
+        ("fwd_due_epoch_5m",        "INTEGER"),
+        ("fwd_exec_epoch_5m",       "INTEGER"),
+        ("fwd_quote_ts_epoch_5m",   "INTEGER"),
+        ("fwd_due_epoch_15m",       "INTEGER"),
+        ("fwd_exec_epoch_15m",      "INTEGER"),
+        ("fwd_quote_ts_epoch_15m",  "INTEGER"),
+        ("fwd_due_epoch_30m",       "INTEGER"),
+        ("fwd_exec_epoch_30m",      "INTEGER"),
+        ("fwd_quote_ts_epoch_30m",  "INTEGER"),
+    ]
+    for col_name, col_type in new_cols:
+        try:
+            cur.execute(f"ALTER TABLE observer_lcr_cont_v1 ADD COLUMN {col_name} {col_type}")
+            log.info(f"  Migration: added column {col_name}")
+        except sqlite3.OperationalError:
+            pass  # column already exists — fine
+
     con.commit()
     con.close()
     log.info(f"Observer DB initialized: {OBS_DB_PATH}")
@@ -237,15 +301,12 @@ def get_candidate_pool(fire_epoch: int) -> list[dict]:
     candidates = []
     for s in snap_rows:
         age_h      = s["age_hours"] or 0.0
-        pf_origin  = 0   # will be overridden from micro
+        pf_origin  = 0
         venue_str  = s["venue"] or ""
+        mint       = s["mint_address"]
+        liq_usd    = s["liq_usd"] or 0.0
 
-        # Classify lane using snapshot data first (pf_origin from micro below)
-        # We'll re-classify after joining micro
-        mint = s["mint_address"]
-
-        # Get latest microstructure row within window (epoch comparison)
-        # logged_at is ISO string; convert to epoch in Python
+        # Get latest microstructure row within window
         cur.execute("""
             SELECT m.r_m5, m.rv_5m, m.range_5m, m.vol_h1, m.liq_usd,
                    m.pumpfun_origin, m.venue, m.logged_at
@@ -259,7 +320,7 @@ def get_candidate_pool(fire_epoch: int) -> list[dict]:
               datetime.fromtimestamp(micro_lo, tz=timezone.utc).isoformat()))
         micro = cur.fetchone()
         if not micro:
-            continue   # no recent microstructure — skip
+            continue
 
         pf_origin  = micro["pumpfun_origin"] or 0
         venue_str  = micro["venue"] or venue_str
@@ -267,14 +328,13 @@ def get_candidate_pool(fire_epoch: int) -> list[dict]:
         rv5m       = micro["rv_5m"]
         range_5m   = micro["range_5m"]
         vol_h1     = micro["vol_h1"] or s["vol_h1"] or 0.0
-        liq_usd    = micro["liq_usd"] or s["liq_usd"] or 0.0
 
         if r_m5 is None:
-            continue   # no momentum data — skip
+            continue
 
         lane = classify_lane(age_h, pf_origin, venue_str)
         if lane != "large_cap_ray":
-            continue   # only large_cap_ray candidates
+            continue
 
         age_sec = age_h * 3600.0
         candidates.append({
@@ -329,50 +389,67 @@ def select_control(pool: list[dict], signal: dict) -> dict | None:
     best["_match_distance"] = distance(best)
     return best
 
-# ── JUPITER QUOTE ─────────────────────────────────────────────────────────────
-def _jup_ultra_get(input_mint: str, output_mint: str, amount: int) -> dict:
-    """Shared Jupiter Ultra GET with retry on transient errors."""
-    if not JUP_API_KEY:
-        return {"ok": False, "data": None, "err": "JUPITER_API_KEY not set"}
-    headers   = {"x-api-key": JUP_API_KEY}
-    params    = {"inputMint": input_mint, "outputMint": output_mint, "amount": amount}
-    last_err  = ""
+# ── JUPITER ULTRA QUOTE (read-only) ──────────────────────────────────────────
+def _jup_quote_get(input_mint: str, output_mint: str, amount: int) -> dict:
+    """
+    Shared Jupiter lite-api /quote GET with retry on transient errors.
+
+    Uses lite-api /swap/v1/quote which returns price data only — no transaction key.
+
+    (A) READ-ONLY SAFETY GUARD:
+    After every HTTP 200 response, check that none of the _TX_KEYS appear with
+    a non-None value. lite-api /quote does not return these keys at all, so this
+    is a defensive belt-and-suspenders check.
+    """
+    headers  = ({"x-api-key": JUP_API_KEY} if JUP_API_KEY else {})
+    # IMPORTANT: do NOT include 'taker' or any execution param
+    params   = {"inputMint": input_mint, "outputMint": output_mint, "amount": amount}
+    last_err = ""
     for attempt, delay in enumerate([0] + JUP_RETRY_DELAYS):
         if delay:
             time.sleep(delay)
         try:
-            r = requests.get(JUP_ULTRA_URL, params=params, headers=headers,
+            r = requests.get(JUP_QUOTE_URL, params=params, headers=headers,
                              timeout=JUP_TIMEOUT_SEC)
             if r.status_code == 200:
-                return {"ok": True, "data": r.json(), "err": None}
+                data = r.json()
+                # (A) Read-only safety check: reject if any tx key has a non-None value
+                for k in _TX_KEYS:
+                    if data.get(k) is not None:
+                        err_msg = f"tx_present_readonly_violation: key={k} value={str(data[k])[:60]}"
+                        log.error(f"  SAFETY VIOLATION: response contained non-null tx key: {k}")
+                        return {"ok": False, "data": None, "err": err_msg}
+                return {"ok": True, "data": data, "err": None}
             last_err = f"HTTP {r.status_code}: {r.text[:120]}"
             if r.status_code in (429, 500, 502, 503):
-                continue   # retry on transient errors
+                continue
             return {"ok": False, "data": None, "err": last_err}
         except Exception as e:
             last_err = str(e)[:200]
     return {"ok": False, "data": None, "err": last_err}
 
 def jup_buy_quote(mint: str) -> dict:
-    """Buy: SOL -> token via Ultra API. Returns dict with ok, out_amount, price_impact, err."""
-    res = _jup_ultra_get(WSOL_MINT, mint, LAMPORTS_IN)
+    """Buy: SOL -> token via lite-api /quote. Returns dict with ok, out_amount, price_impact, quote_ts_epoch, err."""
+    ts = int(time.time())
+    res = _jup_quote_get(WSOL_MINT, mint, LAMPORTS_IN)
     if not res["ok"]:
         return {"ok": 0, "out_amount": None, "price_impact": None,
-                "price_ref": None, "err": res["err"]}
+                "price_ref": None, "quote_ts_epoch": ts, "err": res["err"]}
     data       = res["data"]
     out_amount = int(data.get("outAmount", 0))
     impact     = float(data.get("priceImpactPct", 0) or 0)
     price_ref  = LAMPORTS_IN / out_amount if out_amount > 0 else None
     return {"ok": 1, "out_amount": out_amount, "price_impact": impact,
-            "price_ref": price_ref, "err": None}
+            "price_ref": price_ref, "quote_ts_epoch": ts, "err": None}
 
 def jup_sell_quote(mint: str, token_amount: int) -> dict:
-    """Sell: token -> SOL via Ultra API. Returns dict with ok, sol_out_lamports, err."""
-    res = _jup_ultra_get(mint, WSOL_MINT, token_amount)
+    """Sell: token -> SOL via lite-api /quote. Returns dict with ok, sol_out_lamports, quote_ts_epoch, err."""
+    ts = int(time.time())
+    res = _jup_quote_get(mint, WSOL_MINT, token_amount)
     if not res["ok"]:
-        return {"ok": 0, "sol_out": None, "err": res["err"]}
+        return {"ok": 0, "sol_out": None, "quote_ts_epoch": ts, "err": res["err"]}
     sol_out = int(res["data"].get("outAmount", 0))
-    return {"ok": 1, "sol_out": sol_out, "err": None}
+    return {"ok": 1, "sol_out": sol_out, "quote_ts_epoch": ts, "err": None}
 
 def compute_markout(sol_out_lamports: int | None) -> tuple[float | None, float | None]:
     """Returns (gross_markout, net_fee100) or (None, None) if missing."""
@@ -399,6 +476,7 @@ def upsert_candidate(row: dict):
             quote_source, fixed_notional_sol, slippage_bps,
             entry_quote_ok, entry_out_amount_raw, entry_price_ref,
             entry_price_impact_pct, entry_quote_err,
+            entry_quote_ts_epoch,
             created_at_iso, updated_at_iso
         ) VALUES (
             :candidate_id, :run_id, :signal_fire_id, :candidate_type, :control_for_signal_id,
@@ -411,6 +489,7 @@ def upsert_candidate(row: dict):
             :quote_source, :fixed_notional_sol, :slippage_bps,
             :entry_quote_ok, :entry_out_amount_raw, :entry_price_ref,
             :entry_price_impact_pct, :entry_quote_err,
+            :entry_quote_ts_epoch,
             :created_at_iso, :updated_at_iso
         )
         ON CONFLICT(run_id, signal_fire_id, candidate_type) DO UPDATE SET
@@ -421,7 +500,9 @@ def upsert_candidate(row: dict):
 
 def update_fwd_quote(candidate_id: str, label: str, sol_out: int | None,
                      gross: float | None, net: float | None,
-                     ok: int, err: str | None):
+                     ok: int, err: str | None,
+                     due_epoch: int, exec_epoch: int, quote_ts_epoch: int):
+    """(B) Persist forward quote result including due/exec/quote timestamps."""
     con = sqlite3.connect(OBS_DB_PATH)
     cur = con.cursor()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -432,9 +513,14 @@ def update_fwd_quote(candidate_id: str, label: str, sol_out: int | None,
             fwd_gross_markout_{label}     = ?,
             fwd_net_fee100_{label}        = ?,
             fwd_quote_err_{label}         = ?,
+            fwd_due_epoch_{label}         = ?,
+            fwd_exec_epoch_{label}        = ?,
+            fwd_quote_ts_epoch_{label}    = ?,
             updated_at_iso                = ?
         WHERE candidate_id = ?
-    """, (ok, sol_out, gross, net, err, now_iso, candidate_id))
+    """, (ok, sol_out, gross, net, err,
+          due_epoch, exec_epoch, quote_ts_epoch,
+          now_iso, candidate_id))
     con.commit()
     con.close()
 
@@ -452,37 +538,41 @@ def log_fire(signal_fire_id: str, fire_epoch: int, fire_iso: str,
     con.close()
 
 # ── FORWARD QUOTE SCHEDULER ───────────────────────────────────────────────────
-# Pending forward quotes: list of (target_epoch, candidate_id, mint, token_amount, label)
-_pending_fwd: list[tuple[int, str, str, int, str]] = []
+# Pending forward quotes: list of (target_epoch, candidate_id, mint, token_amount, label, due_epoch)
+_pending_fwd: list[tuple[int, str, str, int, str, int]] = []
 
 def schedule_fwd_quotes(candidate_id: str, mint: str, token_amount: int,
                         fire_epoch: int):
     for sec, label in zip(HORIZONS, HORIZON_LABELS):
-        target = fire_epoch + sec
-        _pending_fwd.append((target, candidate_id, mint, token_amount, label))
+        due_epoch = fire_epoch + sec
+        _pending_fwd.append((due_epoch, candidate_id, mint, token_amount, label, due_epoch))
 
 def process_pending_fwd(now_epoch: int):
     """Execute any forward quotes whose target time has passed."""
     still_pending = []
-    for (target, cid, mint, amount, label) in _pending_fwd:
+    for (target, cid, mint, amount, label, due_epoch) in _pending_fwd:
         if now_epoch >= target:
+            exec_epoch = int(time.time())
             q = jup_sell_quote(mint, amount)
             gross, net = compute_markout(q["sol_out"])
+            jitter = exec_epoch - due_epoch
             update_fwd_quote(cid, label, q["sol_out"], gross, net,
-                             q["ok"], q["err"])
+                             q["ok"], q["err"],
+                             due_epoch, exec_epoch, q["quote_ts_epoch"])
             gross_str = f"{gross:.4f}" if gross is not None else "N/A"
             net_str   = f"{net:.4f}"   if net   is not None else "N/A"
+            # (B) Log jitter so we can audit that +5m is actually ~300s after fire
             log.info(f"  fwd_{label} | {mint[:8]}... | ok={q['ok']} | "
-                     f"gross={gross_str} | net={net_str}")
+                     f"gross={gross_str} | net={net_str} | "
+                     f"due={due_epoch} exec={exec_epoch} jitter={jitter:+d}s")
         else:
-            still_pending.append((target, cid, mint, amount, label))
+            still_pending.append((target, cid, mint, amount, label, due_epoch))
     _pending_fwd.clear()
     _pending_fwd.extend(still_pending)
 
 # ── FIRE LOGIC ────────────────────────────────────────────────────────────────
 def run_fire(fire_epoch: int):
     fire_iso = datetime.fromtimestamp(fire_epoch, tz=timezone.utc).isoformat()
-    # Deterministic fire ID: YYYYMMDD_HHMM UTC of 15-min bucket start
     dt = datetime.fromtimestamp(fire_epoch, tz=timezone.utc)
     signal_fire_id = dt.strftime("%Y%m%d_%H%M")
 
@@ -518,11 +608,13 @@ def run_fire(fire_epoch: int):
     signal_id  = str(uuid.uuid4())
     control_id = str(uuid.uuid4())
 
-    # Entry quotes
+    # Entry quotes — record timestamp immediately before/after call
     sq = jup_buy_quote(signal["mint"])
     cq = jup_buy_quote(control["mint"])
-    log.info(f"  Entry quotes: signal_ok={sq['ok']} out={sq['out_amount']} | "
-             f"control_ok={cq['ok']} out={cq['out_amount']}")
+    log.info(f"  Entry quotes: signal_ok={sq['ok']} out={sq['out_amount']} "
+             f"ts={sq['quote_ts_epoch']} | "
+             f"control_ok={cq['ok']} out={cq['out_amount']} "
+             f"ts={cq['quote_ts_epoch']}")
 
     # Persist signal row
     upsert_candidate({
@@ -558,6 +650,7 @@ def run_fire(fire_epoch: int):
         "entry_price_ref":        sq.get("price_ref"),
         "entry_price_impact_pct": sq.get("price_impact"),
         "entry_quote_err":        sq["err"],
+        "entry_quote_ts_epoch":   sq["quote_ts_epoch"],
     })
 
     # Persist control row
@@ -594,6 +687,7 @@ def run_fire(fire_epoch: int):
         "entry_price_ref":        cq.get("price_ref"),
         "entry_price_impact_pct": cq.get("price_impact"),
         "entry_quote_err":        cq["err"],
+        "entry_quote_ts_epoch":   cq["quote_ts_epoch"],
     })
 
     # Schedule forward quotes (only if entry quote succeeded)
