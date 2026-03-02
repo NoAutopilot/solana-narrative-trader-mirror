@@ -1,0 +1,18 @@
+[Unit]
+Description=LCR Continuation Observer v1 (read-only sidecar)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/solana_trader
+EnvironmentFile=/root/solana_trader/trader_env.conf
+ExecStart=/usr/bin/python3 /root/solana_trader/lcr_continuation_observer_v1.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=solana-lcr-cont-observer
+
+[Install]
+WantedBy=multi-user.target
