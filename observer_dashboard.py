@@ -230,8 +230,8 @@ def load_data(run_id):
                 fire_time=s_row["fire_time_iso"],
                 sig_sym=s_row["symbol"],
                 ctl_sym=c_row["symbol"] if c_row else "—",
-                sig_rm5=s_row["r_m5"],
-                ctl_rm5=c_row["r_m5"] if c_row else None,
+                sig_rm5=s_row["entry_r_m5"],
+                ctl_rm5=c_row["entry_r_m5"] if c_row else None,
                 sig_net5=s_row["fwd_net_fee100_5m"],
                 ctl_net5=c_row["fwd_net_fee100_5m"] if c_row else None,
                 delta5=d5m,
@@ -451,7 +451,7 @@ TEMPLATE = """<!DOCTYPE html>
 <tr>
   <th>fire_id</th><th>time</th>
   <th>signal</th><th>control</th>
-  <th>sig r_m5</th><th>ctl r_m5</th>
+  <th>sig entry_r_m5</th><th>ctl entry_r_m5</th>
   <th>ABS SIG net +5m</th><th>ABS CTL net +5m</th>
   <th>S-C DELTA +5m</th>
   <th>valid</th><th>outlier</th>
