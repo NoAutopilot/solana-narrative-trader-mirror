@@ -217,12 +217,17 @@ def check_micro():
             (latest_logged_at,)
         ).fetchone()
 
-        # Get eligible_cpamm_valid count from latest snapshot
+        # Get eligible_cpamm_valid count from the snapshot closest to (but not after)
+        # the micro poll timestamp — avoids false failures when scanner runs mid-poll
         snap_eligible = conn.execute(
             "SELECT COUNT(*) as eligible_cpamm_valid "
             "FROM universe_snapshot "
-            "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM universe_snapshot) "
-            "AND cpamm_valid_flag = 1"
+            "WHERE snapshot_at <= ? "
+            "AND snapshot_at = ("
+            "  SELECT MAX(snapshot_at) FROM universe_snapshot WHERE snapshot_at <= ?"
+            ") "
+            "AND cpamm_valid_flag = 1",
+            (latest_logged_at, latest_logged_at)
         ).fetchone()
 
         conn.close()
