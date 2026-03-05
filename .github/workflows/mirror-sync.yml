@@ -1,0 +1,105 @@
+name: Mirror Sync (Public Audit Surface)
+
+# Trigger: after successful deploy, or on push to master, or manual
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    name: Sanitize and push to public mirror
+    runs-on: ubuntu-latest
+    if: github.repository == 'NoAutopilot/solana-narrative-trader'
+
+    steps:
+      - name: Checkout private canonical repo (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Strip secrets and sensitive files
+        run: |
+          # Remove files that must never appear in the public mirror
+          DENYLIST=(
+            "trader_env.conf"
+            ".env"
+            "*.env"
+            "*.pem"
+            "*.key"
+            "backups/"
+            "data/"
+            "logs/"
+            "*.db"
+            "*.db-journal"
+            "*.db-shm"
+            "*.db-wal"
+            "deployment_proof.json"
+            ".deployed_sha"
+            "failure_memo_*.md"
+          )
+
+          for pattern in "${DENYLIST[@]}"; do
+            # Remove matching files from the working tree
+            find . -name "$pattern" -not -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
+          done
+
+          # Scrub any remaining secret-like patterns from text files
+          # (belt-and-suspenders: catches keys accidentally embedded in .py files)
+          find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.md" -o -name "*.yml" \) \
+            -not -path "./.git/*" | while read -r f; do
+              # Replace known secret env var values with REDACTED placeholders
+              sed -i \
+                -e 's/\(HELIUS_RPC_URL=\).*/\1REDACTED/g' \
+                -e 's/\(SOLANA_PRIVATE_KEY=\).*/\1REDACTED/g' \
+                -e 's/\(WALLET_ADDRESS=\).*/\1REDACTED/g' \
+                -e 's/\(PUMPPORTAL_API_KEY=\).*/\1REDACTED/g' \
+                -e 's/api-key=[A-Za-z0-9_-]*/api-key=REDACTED/g' \
+                "$f" 2>/dev/null || true
+          done
+
+          echo "Secret stripping complete."
+          ls -la
+
+      - name: Add mirror README
+        run: |
+          cat > MIRROR_README.md <<'EOF'
+          # solana-narrative-trader — Public Audit Mirror
+
+          This is a **read-only, sanitized mirror** of the private canonical repository
+          `NoAutopilot/solana-narrative-trader`.
+
+          ## Purpose
+          - Audit surface for reproducibility and code review
+          - All secrets, wallet keys, API keys, and environment files have been removed
+          - Database files and logs are excluded
+          - This mirror is **not** used for deployment; the VPS deploys from the private repo
+
+          ## What is stripped
+          - `trader_env.conf` (API keys, wallet private key)
+          - All `.env` files
+          - All `.db` / `.db-journal` files
+          - `backups/`, `data/`, `logs/` directories
+          - `deployment_proof.json`, `.deployed_sha`
+          - Any `failure_memo_*.md` files
+
+          ## Sync
+          This mirror is automatically updated on every push to `master` in the private repo.
+          EOF
+
+      - name: Push to public mirror
+        run: |
+          git config user.email "mirror-bot@noautopilot"
+          git config user.name "Mirror Bot"
+
+          # Set up mirror remote using GITHUB_TOKEN
+          git remote add mirror "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/NoAutopilot/solana-narrative-trader-mirror.git" 2>/dev/null || \
+            git remote set-url mirror "https://x-access-token:${{ secrets.MIRROR_PUSH_TOKEN }}@github.com/NoAutopilot/solana-narrative-trader-mirror.git"
+
+          # Stage all changes (including deletions from strip step)
+          git add -A
+          git diff --cached --quiet || git commit -m "mirror: sync from private canonical $(git rev-parse --short HEAD)"
+
+          # Force push to mirror (mirror is always a one-way sync from canonical)
+          git push mirror HEAD:master --force
