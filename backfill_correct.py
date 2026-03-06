@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 WALLET = "<REDACTED_WALLET_PUBKEY>"
-RPC = "https://mainnet.<REDACTED_HELIUS>/?api-key=<REDACTED>"
+RPC = "https://mainnet.<REDACTED_HELIUS>/?api-key=REDACTED<REDACTED>"
 
 def get_tx_balance_change(sig):
     """Get the actual SOL balance change for our wallet from on-chain data."""

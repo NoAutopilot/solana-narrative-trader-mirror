@@ -52,11 +52,11 @@ jobs:
             -not -path "./.git/*" | while read -r f; do
               # Replace known secret env var values with REDACTED placeholders
               sed -i \
-                -e 's/\(HELIUS_RPC_URL=\).*/\1REDACTED/g' \
-                -e 's/\(SOLANA_PRIVATE_KEY=\).*/\1REDACTED/g' \
-                -e 's/\(WALLET_ADDRESS=\).*/\1REDACTED/g' \
-                -e 's/\(PUMPPORTAL_API_KEY=\).*/\1REDACTED/g' \
-                -e 's/api-key=[A-Za-z0-9_-]*/api-key=REDACTED/g' \
+                -e 's/\(HELIUS_RPC_URL=REDACTED
+                -e 's/\(SOLANA_PRIVATE_KEY=REDACTED
+                -e 's/\(WALLET_ADDRESS=REDACTED
+                -e 's/\(PUMPPORTAL_API_KEY=REDACTED
+                -e 's/api-key=REDACTED[A-Za-z0-9_-]*/api-key=REDACTED/g' \
                 "$f" 2>/dev/null || true
           done
 

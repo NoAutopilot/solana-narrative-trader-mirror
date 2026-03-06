@@ -173,7 +173,7 @@ Run this in any Manus session to get a full status:
 sshpass -p '1987Foxsex' ssh -o StrictHostKeyChecking=no root@142.93.24.227 'systemctl is-active solana-trader && python3 -c "import sqlite3; c=sqlite3.connect(\"/root/solana_trader/data/solana_trader.db\"); t=c.execute(\"SELECT COUNT(*) FROM trades\").fetchone()[0]; p=c.execute(\"SELECT COALESCE(SUM(pnl_sol),0) FROM trades WHERE status=\\\"closed\\\"\").fetchone()[0]; print(f\"VPS: {t} trades, PnL: {p:.4f} SOL\"); c.close()" && uptime'
 
 # 2. Wallet balance
-python3 -c "import requests; r=requests.post('https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY', json={'jsonrpc':'2.0','id':1,'method':'getBalance','params':['REDACTED_WALLET_ADDRESS']}); print(f\"Wallet: {r.json()['result']['value']/1e9:.6f} SOL\")"
+python3 -c "import requests; r=requests.post('https://mainnet.helius-rpc.com/?api-key=REDACTED', json={'jsonrpc':'2.0','id':1,'method':'getBalance','params':['REDACTED_WALLET_ADDRESS']}); print(f\"Wallet: {r.json()['result']['value']/1e9:.6f} SOL\")"
 
 # 3. Last GitHub backup
 gh api repos/NoAutopilot/solana-narrative-trader/commits?per_page=1 --jq '.[0].commit.message'

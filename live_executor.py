@@ -434,7 +434,7 @@ def _submit_trade(action, mint_address, pool="auto", **extra_params):
     }
     
     resp = requests.post(
-        f"{PUMPPORTAL_TRADE_URL}?api-key={PUMPPORTAL_API_KEY}",
+        f"{PUMPPORTAL_TRADE_URL}?api-key=REDACTED{PUMPPORTAL_API_KEY}",
         data=params,
         timeout=30
     )
