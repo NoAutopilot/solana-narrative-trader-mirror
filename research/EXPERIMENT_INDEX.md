@@ -5,10 +5,11 @@ Hypothesis matrix order: LCR continuation → LCR reversion → PFM continuation
 | # | ID | Name | Status | run_id | Started | Decided | Result |
 |---|---|---|---|---|---|---|---|
 | 1 | EXP-20260303-lcr-continuation | LCR Continuation Observer v1 (initial) | **SUPPORTIVE / REPLICATION REQUIRED** | `70adb2c2` | 2026-03-03 | 2026-03-05 | SUPPORTIVE |
-| 2 | EXP-20260305-lcr-continuation-conf | LCR Continuation Observer v1 (confirmatory) | **RUNNING** | `3d83189b` | 2026-03-05 | — | — |
-| 3 | EXP-20260305-lcr-reversion | LCR Reversion Observer v1 | **DESIGNED / NOT STARTED** | — | — | — | — |
-| 4 | EXP-TBD-pfm-continuation | PFM Continuation Observer v1 | NOT DESIGNED | — | — | — | — |
-| 5 | EXP-TBD-pfm-reversion | PFM Reversion Observer v1 | NOT DESIGNED | — | — | — | — |
+| 2 | EXP-20260305-lcr-continuation-conf | LCR Continuation Observer v1 (confirmatory) | **ARCHIVED** | `0c5337dd` | 2026-03-05 | 2026-03-06 | SUPPORTED (rel) / NOT PROMOTABLE (abs) |
+| 3 | EXP-20260306-lcr-cont-sidecar | LCR Cont Regime Sidecar v1 | **COMPLETED** | `0c5337dd` | 2026-03-06 | 2026-03-06 | COMPLETED (Read-only) |
+| 4 | EXP-20260305-lcr-reversion | LCR Reversion Observer v1 | **DESIGNED / NOT STARTED** | — | — | — | — |
+| 5 | EXP-TBD-pfm-continuation | PFM Continuation Observer v1 | NOT DESIGNED | — | — | — | — |
+| 6 | EXP-TBD-pfm-reversion | PFM Reversion Observer v1 | NOT DESIGNED | — | — | — | — |
 
 ---
 
@@ -25,4 +26,4 @@ Hypothesis matrix order: LCR continuation → LCR reversion → PFM continuation
 
 | Observer | Service | Status | run_id |
 |---|---|---|---|
-| `lcr_continuation_observer_v1` (confirmatory) | `solana-lcr-cont-observer.service` | **RUNNING** | `3d83189b-68b1-429f-bbd9-2be4a36e71c3` |
+| — | — | **NONE** | — |

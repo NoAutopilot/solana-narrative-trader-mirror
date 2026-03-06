@@ -63,18 +63,52 @@ Result is robust under A1 and A2. Under A3 (worst-case), the CI lower bound cros
 
 ## Entry 002 — LCR Continuation Confirmatory (EXP-20260305-lcr-continuation-conf)
 
-**Status:** RUNNING
-**Charter:** Same preregistered rules as Entry 001. No parameter changes.
-**run_id:** `3d83189b-68b1-429f-bbd9-2be4a36e71c3`
-**Started:** 2026-03-05T03:15Z (auto-started on service restart after deploy)
-**Requirement:** ≥95% +5m coverage, fully reconciled counts, before interpreting result.
+**Status:** SUPPORTED (relative) / NOT PROMOTABLE (absolute)
+**run_id:** `0c5337dd-2488-4730-90b6-e371fd1e9511`
+**Date:** 2026-03-06
+
+**Result Summary (n=122):**
+- **mean delta +5m:** +0.001227
+- **median delta +5m:** +0.001031
+- **95% CI:** [+0.000497, +0.001957]
+- **% delta > 0:** 68.0%
+- **mean signal net +5m:** -0.012407
+- **mean control net +5m:** -0.013634
+
+**Interpretation:**
+The hypothesis is confirmed: `large_cap_ray` continuation signals hold a statistically significant relative edge over matched controls. However, absolute markout remains negative across the entire dataset. The signal is a valid ranking feature but not a standalone tradable edge for a long strategy in the observed market environment.
+
+**Decision:**
+STOPPED and ARCHIVED. Not promotable as a standalone long strategy.
 
 ---
 
-## Entry 003 — LCR Reversion (EXP-20260305-lcr-reversion)
+## Entry 003 — LCR Continuation Regime Sidecar v1
+
+**Status:** COMPLETED (Read-only)
+**Date:** 2026-03-06
+
+**Goal:**
+Test if specific `large_cap_ray` market regimes flip absolute signal net +5m to positive using the Entry 002 dataset.
+
+**Regime Analysis (n=122):**
+| Regime Group | n | s_net_mn | s_net_md | c_net_mn | d_mn | d_md | d>0 |
+|---|---|---|---|---|---|---|---|
+| ALL | 122 | -0.012407 | -0.012286 | -0.013634 | +0.001227 | +0.001031 | 68.0% |
+| BREADTH_POS (>60%) | 21 | -0.012178 | -0.011066 | -0.013431 | +0.001253 | +0.002064 | 76.2% |
+| MEDIAN_POS (>0) | 38 | -0.012160 | -0.012183 | -0.013577 | +0.001418 | +0.002000 | 68.4% |
+| BOTH_POS | 21 | -0.012178 | -0.011066 | -0.013431 | +0.001253 | +0.002064 | 76.2% |
+
+**Conclusion:**
+No tested regime subgroup produced a positive absolute signal net +5m. While the relative delta improved slightly in positive breadth/median regimes, the absolute edge remains deeply negative.
+
+**Decision:**
+Continuation is confirmed as a ranking feature only. No standalone strategy promotion is supported even under regime filtering.
+
+---
+
+## Entry 004 — LCR Reversion (EXP-20260305-lcr-reversion)
 
 **Status:** DESIGNED / NOT STARTED
 **Charter:** `research/experiments/EXP-20260305-lcr-reversion/charter.md`
-**Not started until:** LCR continuation confirmatory is decided AND explicit user approval.
-
----
+**Not started until:** Explicit user approval.
