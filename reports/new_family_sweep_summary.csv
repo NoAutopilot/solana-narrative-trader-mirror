@@ -1,0 +1,9 @@
+feature,lcr_rho_5m,pfmc_rho_5m,pfmr_rho_5m,mean_rho_5m,rho_sign_consistent,lcr_tercile_diff,pfmc_tercile_diff,pfmr_tercile_diff,mean_tercile_diff,tercile_sign_consistent,any_top_tercile_positive
+entry_rv5m,0.0626,0.0657,0.0698,0.066,True,0.00063,0.01773,0.01234,0.01023,True,False
+entry_range_5m,0.0794,0.0484,0.0598,0.0625,True,0.00079,0.01438,0.00887,0.00801,True,False
+log_vol_h1,0.375,0.0652,0.0696,0.1699,True,0.00261,0.01068,0.01896,0.01075,True,False
+log_age,0.6758,0.1355,0.0785,0.2966,True,0.00472,0.02775,0.00862,0.0137,True,False
+log_liq,0.1652,0.1311,-0.0213,0.0917,False,0.00211,0.01762,-0.00433,0.00513,False,False
+inv_liq,-0.1652,-0.1311,0.0213,-0.0917,False,-0.00211,-0.01762,0.00433,-0.00513,False,False
+entry_price_impact_pct,0.0459,0.0485,0.0312,0.0419,True,2e-05,0.01561,0.01059,0.00874,True,False
+abs_price_impact,0.0459,-0.0535,-0.0133,-0.007,False,2e-05,-0.01585,-0.0069,-0.00758,False,False
