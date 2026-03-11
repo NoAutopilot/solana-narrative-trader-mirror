@@ -240,7 +240,26 @@ def run_fire(fire_time: datetime, conn: sqlite3.Connection) -> dict:
         return {"fire_id": fire_id, "n_candidates": 0, "n_written": 0, "skipped": False}
 
     # ── 3. Breadth / pool-level metrics (derived, no lookahead) ─────────────
-    r_m5_vals = [c["r_m5"] for c in candidates if c["r_m5"] is not None]
+    # Source r_m5 from microstructure_log (not snapshot — snapshot.r_m5 is often NULL).
+    # Collect the most recent micro r_m5 for each eligible candidate within the 60s window.
+    fire_ts_minus_60 = (fire_time - timedelta(seconds=MICRO_LOOKBACK_S)).isoformat()
+    pool_micro_r_m5_rows = conn.execute("""
+        SELECT m.r_m5
+        FROM (
+            SELECT mint_address, MAX(logged_at) as latest_at
+            FROM microstructure_log
+            WHERE logged_at <= ?
+              AND logged_at >= ?
+              AND mint_address IN ({})
+            GROUP BY mint_address
+        ) best
+        JOIN microstructure_log m
+          ON m.mint_address = best.mint_address AND m.logged_at = best.latest_at
+        WHERE m.r_m5 IS NOT NULL
+    """.format(",".join("?" * len(candidates))),
+        [fire_ts, fire_ts_minus_60] + [c["mint_address"] for c in candidates]
+    ).fetchall()
+    r_m5_vals = [row[0] for row in pool_micro_r_m5_rows if row[0] is not None]
     breadth_positive_pct = (
         sum(1 for v in r_m5_vals if v > 0) / len(r_m5_vals) * 100
         if r_m5_vals else None
@@ -251,8 +270,6 @@ def run_fire(fire_time: datetime, conn: sqlite3.Connection) -> dict:
     )
 
     # ── 4. Per-candidate micro join ──────────────────────────────────────────
-    fire_ts_minus_60 = (fire_time - timedelta(seconds=MICRO_LOOKBACK_S)).isoformat()
-
     rows_written = 0
     now_utc = datetime.now(timezone.utc).isoformat()
 
