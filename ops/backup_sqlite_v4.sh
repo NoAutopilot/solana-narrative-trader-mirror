@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# backup_sqlite.sh — Hot SQLite backup with SHA256, meta.json, and tiered retention
-# Safe for live DBs: uses SQLite online backup API via Python
+# backup_sqlite.sh — Hot SQLite backup with zstd compression, SHA256, meta.json, tiered retention
+# Safe for live DBs: uses SQLite online backup API via Python, then compresses with zstd
 # Usage: ./backup_sqlite.sh [15min|hourly|daily]
 # Called by systemd timer; tier argument used for retention labelling only.
 #
-# RETENTION POLICY (v3 — 2026-03-11, sustainable for 24GB VPS):
+# RETENTION POLICY (v4 — 2026-03-11, durable for 24GB VPS):
 #
 #   ACTIVE DBs (solana_trader — live, growing):
-#     15-min backups : keep 6h   (24 copies × ~185MB = ~4.4GB)
-#     hourly backups : keep 48h  (48 copies × ~185MB = ~8.9GB — but only :00 files)
-#     daily backups  : keep 7d   (7 copies  × ~185MB = ~1.3GB — but only 00:00 files)
-#     Steady state   : ~14.6GB max (well within 24GB disk)
+#     15-min backups : keep 6h    (~24 copies × ~30MB compressed = ~0.7GB)
+#     hourly backups : keep 24h   (~24 copies × ~30MB compressed = ~0.7GB)
+#     daily backups  : keep 7d    (~7  copies × ~30MB compressed = ~0.2GB)
+#     Steady state   : ~1.6GB (vs 18GB uncompressed) — well within 24GB disk
 #
 #   ARCHIVED / STATIC DBs (observer_*, post_bonding — no active writes):
-#     Keep ONE immutable local snapshot only
+#     Keep ONE immutable local snapshot (compressed)
 #     No 15-min backups, no hourly backups
-#     Optional daily backup for 7d max (skipped here — snapshot is sufficient)
 #
-# COMPRESSION: none (SQLite backup API produces valid .db files)
-# OUTPUT: <timestamp>.db + <timestamp>.db.sha256 + <timestamp>.db.meta.json
+# COMPRESSION: zstd -3 (fast, ~8:1 ratio on SQLite files)
+# OUTPUT: <timestamp>.db.zst + <timestamp>.db.zst.sha256 + <timestamp>.db.zst.meta.json
 #
-# Local durability only — off-box backup not configured.
+# OFF-BOX: rclone sync configured separately (see ops/offbox_backup.sh)
+# Local durability only until off-box credentials are configured.
 set -euo pipefail
 
 TIER="${1:-15min}"
@@ -59,13 +59,17 @@ backup_db() {
         return 0
     fi
 
-    local DEST_FILE="$DEST_DIR/${TIMESTAMP}.db"
+    local TMP_DB
+    TMP_DB="$(mktemp /tmp/backup_${DB_NAME}_XXXXXX.db)"
+    local DEST_FILE="$DEST_DIR/${TIMESTAMP}.db.zst"
+
     log "Backing up $DB_NAME ($SRC) -> $DEST_FILE"
 
+    # Hot backup via Python sqlite3 online backup API
     python3 - <<PYEOF
 import sqlite3, sys
 src = "$SRC"
-dst = "$DEST_FILE"
+dst = "$TMP_DB"
 try:
     src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30)
     dst_con = sqlite3.connect(dst, timeout=30)
@@ -79,17 +83,20 @@ except Exception as e:
 PYEOF
 
     if [[ $? -ne 0 ]]; then
-        log "FAIL backup $DB_NAME"
-        rm -f "$DEST_FILE"
+        log "FAIL sqlite backup $DB_NAME"
+        rm -f "$TMP_DB"
         BACKUP_FAIL=$((BACKUP_FAIL + 1))
         return 1
     fi
 
-    # Row counts
+    local RAW_SIZE
+    RAW_SIZE="$(stat -c%s "$TMP_DB")"
+
+    # Row counts from raw backup
     local ROW_COUNTS
     ROW_COUNTS="$(python3 - <<PYEOF
 import sqlite3, json
-con = sqlite3.connect(f"file:$DEST_FILE?mode=ro", uri=True, timeout=10)
+con = sqlite3.connect(f"file:$TMP_DB?mode=ro", uri=True, timeout=10)
 tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 counts = {}
 for t in tables:
@@ -100,13 +107,27 @@ print(json.dumps(counts))
 PYEOF
 )"
 
-    local FILE_SIZE
-    FILE_SIZE="$(stat -c%s "$DEST_FILE")"
+    # Compress with zstd -3 (fast, good ratio)
+    zstd -3 --force --quiet "$TMP_DB" -o "$DEST_FILE"
+    rm -f "$TMP_DB"
 
-    # SHA256
+    if [[ $? -ne 0 ]] || [[ ! -f "$DEST_FILE" ]]; then
+        log "FAIL zstd compression $DB_NAME"
+        rm -f "$DEST_FILE"
+        BACKUP_FAIL=$((BACKUP_FAIL + 1))
+        return 1
+    fi
+
+    local COMP_SIZE
+    COMP_SIZE="$(stat -c%s "$DEST_FILE")"
+
+    local RATIO
+    RATIO="$(python3 -c "print('%.1f' % ($RAW_SIZE / max($COMP_SIZE, 1)))")"
+
+    # SHA256 of compressed file
     local SHA256
     SHA256="$(sha256sum "$DEST_FILE" | awk '{print $1}')"
-    echo "$SHA256  ${TIMESTAMP}.db" > "${DEST_FILE}.sha256"
+    echo "$SHA256  ${TIMESTAMP}.db.zst" > "${DEST_FILE}.sha256"
 
     # meta.json
     python3 - <<PYEOF
@@ -117,18 +138,21 @@ meta = {
     "backup_path": "$DEST_FILE",
     "timestamp_utc": "$TIMESTAMP",
     "tier": "$TIER",
-    "file_size_bytes": $FILE_SIZE,
+    "compression": "zstd-3",
+    "raw_size_bytes": $RAW_SIZE,
+    "compressed_size_bytes": $COMP_SIZE,
+    "compression_ratio": $RATIO,
     "sha256": "$SHA256",
     "row_counts": $ROW_COUNTS,
-    "retention_policy": "active: 6h/15min 48h/hourly 7d/daily",
-    "durability_note": "Local durability only — off-box backup not configured."
+    "retention_policy": "active: 6h/15min 24h/hourly 7d/daily",
+    "durability_note": "Local durability only — off-box backup not yet configured (blocked: no credentials)."
 }
 with open("${DEST_FILE}.meta.json", "w") as f:
     json.dump(meta, f, indent=2)
 print("meta written")
 PYEOF
 
-    log "OK $DB_NAME size=${FILE_SIZE}B sha256=${SHA256:0:16}..."
+    log "OK $DB_NAME raw=${RAW_SIZE}B compressed=${COMP_SIZE}B ratio=${RATIO}x sha256=${SHA256:0:16}..."
     BACKUP_OK=$((BACKUP_OK + 1))
 }
 
@@ -140,8 +164,7 @@ done
 # ── Back up archived DBs (one immutable snapshot only) ────────────────────
 for DB_NAME in "${!ARCHIVED_DBS[@]}"; do
     DEST_DIR="$BACKUP_ROOT/$DB_NAME"
-    # Check if any snapshot already exists
-    EXISTING=$(find "$DEST_DIR" -name "*.db" ! -name "*.sha256" ! -name "*.meta.json" 2>/dev/null | wc -l)
+    EXISTING=$(find "$DEST_DIR" -name "*.db.zst" ! -name "*.sha256" ! -name "*.meta.json" 2>/dev/null | wc -l)
     if [[ "$EXISTING" -gt 0 ]]; then
         log "SKIP archived $DB_NAME — immutable snapshot already exists ($EXISTING files)"
         continue
@@ -159,17 +182,15 @@ from datetime import datetime, timezone
 BACKUP_ROOT = "$BACKUP_ROOT"
 NOW = datetime.now(timezone.utc)
 
-# Active DB retention windows
+# Active DB retention windows (v4)
 KEEP_15MIN_HOURS = 6        # 15-min backups: keep 6h   (~24 copies)
-KEEP_HOURLY_HOURS = 48      # hourly backups: keep 48h  (~48 copies at :00)
+KEEP_HOURLY_HOURS = 24      # hourly backups: keep 24h  (~24 copies at :00)
 KEEP_DAILY_HOURS  = 24 * 7  # daily backups:  keep 7d   (~7 copies at 00:00)
 
-# Archived/static DBs — never delete any snapshot
 ARCHIVED_DBS = {
     "observer_lcr_cont_v1", "observer_pfm_cont_v1",
     "observer_pfm_rev_v1", "post_bonding"
 }
-ACTIVE_DBS = {"solana_trader"}
 
 deleted = 0
 kept = 0
@@ -178,19 +199,20 @@ for db_dir in glob.glob(f"{BACKUP_ROOT}/*/"):
     db_name = os.path.basename(db_dir.rstrip("/"))
 
     if db_name in ARCHIVED_DBS:
-        # Keep all existing snapshots for archived DBs — never delete
-        files = [f for f in glob.glob(f"{db_dir}*.db")
+        # Keep all existing snapshots for archived DBs
+        files = [f for f in glob.glob(f"{db_dir}*.db.zst")
                  if not f.endswith('.sha256') and not f.endswith('.meta.json')]
         kept += len(files)
         continue
 
-    # Active DBs: tiered retention
-    files = sorted([f for f in glob.glob(f"{db_dir}*.db")
-                    if not f.endswith('.sha256') and not f.endswith('.meta.json')])
+    # Active DBs: tiered retention (match both .db.zst and legacy .db)
+    files = sorted([f for f in glob.glob(f"{db_dir}*")
+                    if (f.endswith('.db.zst') or f.endswith('.db'))
+                    and not f.endswith('.sha256') and not f.endswith('.meta.json')])
 
     for f in files:
         fname = os.path.basename(f)
-        m = re.match(r'^(\d{8}T\d{6}Z)\.db$', fname)
+        m = re.match(r'^(\d{8}T\d{6}Z)\.db(\.zst)?$', fname)
         if not m:
             continue
         try:
@@ -199,21 +221,18 @@ for db_dir in glob.glob(f"{BACKUP_ROOT}/*/"):
             continue
         age_h = (NOW - ts).total_seconds() / 3600
 
-        # Keep all within 6h (covers 15-min tier)
         if age_h <= KEEP_15MIN_HOURS:
             kept += 1
             continue
-        # Keep hourly within 48h (files at :00 minutes)
         if age_h <= KEEP_HOURLY_HOURS and ts.minute == 0:
             kept += 1
             continue
-        # Keep daily within 7d (files at 00:00 UTC)
         if age_h <= KEEP_DAILY_HOURS and ts.hour == 0 and ts.minute == 0:
             kept += 1
             continue
 
-        # Delete this backup and its sidecars
-        for ext in ['', '.sha256', '.meta.json']:
+        # Delete backup and all sidecars (both .db and .db.zst variants)
+        for ext in ['', '.sha256', '.meta.json', '.zst', '.zst.sha256', '.zst.meta.json']:
             fp = f + ext
             if os.path.exists(fp):
                 os.remove(fp)
@@ -221,6 +240,22 @@ for db_dir in glob.glob(f"{BACKUP_ROOT}/*/"):
 
 print(f"Retention cleanup: kept={kept} deleted={deleted}")
 PYEOF
+
+# ── Off-box sync (rclone) ─────────────────────────────────────────────────
+RCLONE_REMOTE="${RCLONE_REMOTE:-}"
+if [[ -n "$RCLONE_REMOTE" ]]; then
+    log "Syncing to off-box: $RCLONE_REMOTE"
+    rclone sync "$BACKUP_ROOT" "$RCLONE_REMOTE" \
+        --transfers=4 \
+        --checksum \
+        --log-level INFO \
+        --log-file="$LOG_FILE" \
+        --exclude="*.tmp" \
+        2>&1 | tee -a "$LOG_FILE"
+    log "rclone sync done (exit=$?)"
+else
+    log "SKIP off-box sync — RCLONE_REMOTE not set (blocked: no credentials)"
+fi
 
 log "=== backup_sqlite.sh DONE ok=$BACKUP_OK fail=$BACKUP_FAIL ==="
 if [[ $BACKUP_FAIL -gt 0 ]]; then

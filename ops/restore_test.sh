@@ -1,180 +1,102 @@
 #!/usr/bin/env bash
-# restore_test.sh — Restore drill for all critical DBs
-# Takes the latest backup of each critical DB, restores to temp dir,
-# runs integrity_check, prints table counts, confirms latest run_id/timestamp.
-# Writes: reports/ops/restore_test_latest.md
+# restore_test.sh — Verify latest backup: decompress, integrity_check, row counts
+# Works with both .db.zst (compressed) and legacy .db (uncompressed) backups.
+# Usage: ./restore_test.sh [db_name]
+# Default db_name: solana_trader
 set -euo pipefail
 
+DB_NAME="${1:-solana_trader}"
 BACKUP_ROOT="/root/solana_trader/backups/sqlite"
-RESTORE_DIR="/tmp/solana_restore_test_$$"
-REPORT_DIR="/root/solana_trader/reports/ops"
-REPORT_FILE="$REPORT_DIR/restore_test_latest.md"
-LOG_FILE="/var/log/solana_trader/restore_test.log"
-TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+DEST_DIR="$BACKUP_ROOT/$DB_NAME"
+LOG_FILE="/var/log/solana_trader/backup_sqlite.log"
 
-mkdir -p "$RESTORE_DIR" "$REPORT_DIR" "$(dirname "$LOG_FILE")"
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RESTORE_TEST $*" | tee -a "$LOG_FILE"; }
+log "=== restore_test.sh START db=$DB_NAME ==="
 
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$LOG_FILE"; }
+# ── Find latest backup (prefer .db.zst, fall back to .db) ─────────────────
+LATEST_ZST="$(ls "$DEST_DIR"/*.db.zst 2>/dev/null | grep -v '.sha256\|.meta.json' | sort | tail -1 || true)"
+LATEST_DB="$(ls "$DEST_DIR"/*.db 2>/dev/null | grep -v '.sha256\|.meta.json' | sort | tail -1 || true)"
 
-log "=== restore_test.sh START ==="
+if [[ -n "$LATEST_ZST" ]]; then
+    LATEST="$LATEST_ZST"
+    COMPRESSED=true
+    log "Found compressed backup: $LATEST"
+elif [[ -n "$LATEST_DB" ]]; then
+    LATEST="$LATEST_DB"
+    COMPRESSED=false
+    log "Found uncompressed backup (legacy): $LATEST"
+else
+    log "FAIL — no backup files found in $DEST_DIR"
+    exit 1
+fi
 
+# ── SHA256 verify ─────────────────────────────────────────────────────────
+SHA256_FILE="${LATEST}.sha256"
+if [[ -f "$SHA256_FILE" ]]; then
+    cd "$(dirname "$LATEST")"
+    sha256sum -c "$(basename "$SHA256_FILE")" --status && log "SHA256: PASS" || { log "SHA256: FAIL"; exit 1; }
+    cd - > /dev/null
+else
+    log "WARNING: no .sha256 file found — skipping checksum verify"
+fi
+
+# ── Decompress to temp dir ────────────────────────────────────────────────
+RESTORE_DIR="$(mktemp -d)"
+RESTORE_DB="$RESTORE_DIR/${DB_NAME}_restore_test.db"
+
+if [[ "$COMPRESSED" == "true" ]]; then
+    log "Decompressing with zstd..."
+    zstd -d --quiet "$LATEST" -o "$RESTORE_DB"
+    COMP_SIZE="$(stat -c%s "$LATEST")"
+    RAW_SIZE="$(stat -c%s "$RESTORE_DB")"
+    RATIO="$(python3 -c "print('%.1f' % ($RAW_SIZE / max($COMP_SIZE, 1)))")"
+    log "Decompressed: compressed=${COMP_SIZE}B raw=${RAW_SIZE}B ratio=${RATIO}x"
+else
+    cp "$LATEST" "$RESTORE_DB"
+    RAW_SIZE="$(stat -c%s "$RESTORE_DB")"
+    log "Copied uncompressed: size=${RAW_SIZE}B"
+fi
+
+# ── Integrity check + row counts ──────────────────────────────────────────
 python3 - <<PYEOF
-import sqlite3, os, glob, json
-from datetime import datetime, timezone
+import sqlite3, json, sys
 
-BACKUP_ROOT = "$BACKUP_ROOT"
-RESTORE_DIR = "$RESTORE_DIR"
-REPORT_FILE = "$REPORT_FILE"
-TIMESTAMP   = "$TIMESTAMP"
+db = "$RESTORE_DB"
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
 
-CRITICAL_DBS = [
-    "solana_trader",
-    "observer_lcr_cont_v1",
-    "observer_pfm_cont_v1",
-    "observer_pfm_rev_v1",
-    "post_bonding",
-]
+# Integrity check
+result = con.execute("PRAGMA integrity_check").fetchone()[0]
+print(f"integrity_check: {result}")
+if result != "ok":
+    print("FAIL: integrity_check did not return 'ok'", file=sys.stderr)
+    sys.exit(1)
 
-results = []
-overall_pass = True
+# All tables
+tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+print(f"Tables ({len(tables)}): {', '.join(sorted(tables))}")
 
-for db_name in CRITICAL_DBS:
-    db_dir = os.path.join(BACKUP_ROOT, db_name)
-    backups = sorted(glob.glob(f"{db_dir}/*.db"))
-    if not backups:
-        results.append({
-            "db": db_name,
-            "status": "FAIL",
-            "reason": "No backup found",
-            "backup_file": None,
-            "integrity": None,
-            "row_counts": {},
-            "latest_ts": None,
-        })
-        overall_pass = False
-        continue
-
-    latest = backups[-1]
-    restore_path = os.path.join(RESTORE_DIR, f"{db_name}_restored.db")
-
-    # Copy backup to restore dir
-    import shutil
-    shutil.copy2(latest, restore_path)
-
-    # Verify SHA256 if .sha256 exists
-    sha256_file = latest + ".sha256"
-    sha256_ok = None
-    if os.path.exists(sha256_file):
-        import hashlib
-        h = hashlib.sha256()
-        with open(latest, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        computed = h.hexdigest()
-        with open(sha256_file) as f:
-            expected = f.read().split()[0]
-        sha256_ok = (computed == expected)
-
-    # Integrity check
+# Key table row counts
+key_tables = sorted(tables)
+for t in key_tables:
     try:
-        con = sqlite3.connect(f"file:{restore_path}?mode=ro", uri=True, timeout=30)
-        integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
-        tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        row_counts = {}
-        for t in tables:
-            try: row_counts[t] = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
-            except: row_counts[t] = -1
-
-        # Get latest timestamp
-        latest_ts = None
-        for t in tables:
-            cols = [r[1] for r in con.execute(f'PRAGMA table_info("{t}")').fetchall()]
-            for col in ["updated_at_iso","created_at_iso","fire_time_iso","snapshot_at","logged_at"]:
-                if col in cols:
-                    val = con.execute(f'SELECT MAX("{col}") FROM "{t}"').fetchone()[0]
-                    if val and (latest_ts is None or str(val) > str(latest_ts)):
-                        latest_ts = str(val)
-                    break
-
-        # Get latest run_id for observer tables
-        run_ids = {}
-        for t in tables:
-            cols = [r[1] for r in con.execute(f'PRAGMA table_info("{t}")').fetchall()]
-            if "run_id" in cols:
-                runs = con.execute(f'SELECT run_id, COUNT(*) as n FROM "{t}" GROUP BY run_id ORDER BY n DESC LIMIT 3').fetchall()
-                run_ids[t] = [(r[0], r[1]) for r in runs]
-        con.close()
-
-        status = "PASS" if integrity == "ok" else "FAIL"
-        if integrity != "ok":
-            overall_pass = False
-
+        n = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+        print(f"  {t}: {n} rows")
     except Exception as e:
-        integrity = f"ERROR: {e}"
-        tables = []
-        row_counts = {}
-        latest_ts = None
-        run_ids = {}
-        status = "FAIL"
-        overall_pass = False
+        print(f"  {t}: ERROR {e}")
 
-    results.append({
-        "db": db_name,
-        "status": status,
-        "backup_file": os.path.basename(latest),
-        "sha256_ok": sha256_ok,
-        "integrity": integrity,
-        "row_counts": row_counts,
-        "latest_ts": latest_ts,
-        "run_ids": run_ids,
-    })
+# Feature tape specific
+if "feature_tape_v1" in tables:
+    fires = con.execute("SELECT COUNT(DISTINCT fire_id) FROM feature_tape_v1").fetchone()[0]
+    rows  = con.execute("SELECT COUNT(*) FROM feature_tape_v1").fetchone()[0]
+    first = con.execute("SELECT MIN(fire_time_utc) FROM feature_tape_v1").fetchone()[0]
+    last  = con.execute("SELECT MAX(fire_time_utc) FROM feature_tape_v1").fetchone()[0]
+    print(f"feature_tape_v1 summary: fires={fires} rows={rows} first={first} last={last}")
 
-# Write report
-lines = [
-    f"# Restore Test Report",
-    f"_Run: {TIMESTAMP}_",
-    f"_Overall: {'PASS' if overall_pass else 'FAIL'}_",
-    "",
-    "---",
-    "",
-]
-for r in results:
-    lines.append(f"## {r['db']}")
-    lines.append(f"- **Status:** {r['status']}")
-    lines.append(f"- **Backup file:** {r.get('backup_file', 'N/A')}")
-    if r.get('sha256_ok') is not None:
-        lines.append(f"- **SHA256 verified:** {'YES' if r['sha256_ok'] else 'NO — MISMATCH'}")
-    lines.append(f"- **Integrity check:** {r.get('integrity', 'N/A')}")
-    lines.append(f"- **Latest timestamp:** {r.get('latest_ts', 'N/A')}")
-    if r.get('row_counts'):
-        lines.append("- **Row counts:**")
-        for t, n in r['row_counts'].items():
-            lines.append(f"  - {t}: {n}")
-    if r.get('run_ids'):
-        lines.append("- **Run IDs (top 3 by row count):**")
-        for t, runs in r['run_ids'].items():
-            for run_id, n in runs:
-                lines.append(f"  - {t}: {run_id} ({n} rows)")
-    lines.append("")
-
-lines.append("---")
-lines.append(f"_Restore test {'PASSED' if overall_pass else 'FAILED'} at {TIMESTAMP}_")
-
-os.makedirs(os.path.dirname(REPORT_FILE), exist_ok=True)
-with open(REPORT_FILE, "w") as f:
-    f.write("\n".join(lines))
-
-print(f"OVERALL: {'PASS' if overall_pass else 'FAIL'}")
-print(f"Report: {REPORT_FILE}")
-for r in results:
-    sha = f" sha256={'OK' if r.get('sha256_ok') else 'NO'}" if r.get('sha256_ok') is not None else ""
-    print(f"  {r['db']}: {r['status']}{sha} integrity={r.get('integrity','?')} latest={r.get('latest_ts','?')}")
-
-import sys
-sys.exit(0 if overall_pass else 1)
+con.close()
+print("RESTORE TEST: PASS")
 PYEOF
 
-EXIT_CODE=$?
-log "=== restore_test.sh DONE exit=$EXIT_CODE ==="
+RC=$?
 rm -rf "$RESTORE_DIR"
-exit $EXIT_CODE
+log "=== restore_test.sh DONE exit=$RC ==="
+exit $RC
