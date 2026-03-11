@@ -1,21 +1,32 @@
 {
-  "run_started_at_utc": "2026-03-11T00:22:29Z",
-  "first_fire_id": "f020032c",
-  "first_fire_time_utc": "2026-03-11T00:30:00Z",
-  "github_commit": "a6fb8c4",
-  "github_commit_message": "fix: source breadth/median from microstructure_log.r_m5 (snapshot.r_m5 is NULL)",
+  "run_started_at_utc": "2026-03-11T00:43:30Z",
+  "first_fire_id": null,
+  "first_fire_time_utc": "2026-03-11T00:45:00Z",
+  "github_commit": "deb7cdc",
+  "github_commit_message": "feat: per-candidate r_m5 from micro, add pool_size_total/pool_size_with_micro fields",
   "vps_local_commit": "e06a31c",
   "vps_local_commit_message": "feat: add feature_tape_v1 and health report (deployed via SCP)",
-  "deployed_sha256": "c70e4670f0e2041a3e8a0d5cd2f16e354df183b5c04a37215028d1b105ed59c9",
+  "deployed_sha256": "pending_first_fire",
   "db_path": "/root/solana_trader/data/solana_trader.db",
   "table_name": "feature_tape_v1",
   "service_name": "solana-feature-tape.service",
   "working_tree_clean": false,
-  "working_tree_note": "VPS git repo has its own local commit history driven by automated DB backup commits (every 30 min). The VPS repo is not pushed to GitHub — SSH key auth is not configured on VPS for GitHub. Deployment workflow: write code locally -> push to GitHub -> SCP to VPS -> commit locally on VPS. GitHub commit (a6fb8c4) and VPS local commit (e06a31c) differ because VPS has additional automated commits between deployments. The deployed file is identified by its SHA256 as the canonical identity. Modified files in working tree (REPORTS/LATEST_LCR_CONT_REPORT.md, REPORTS/canary_proof.md) are unrelated to feature_tape_v1.",
-  "rows_discarded_before_clean_run": 70,
-  "discard_reason": "breadth_positive_pct and median_pool_r_m5 were NULL on all rows due to sourcing from universe_snapshot.r_m5 (which is NULL). Fixed to source from microstructure_log.r_m5.",
+  "working_tree_note": "VPS git repo has its own local commit history driven by automated DB backup commits (every 30 min). The VPS repo is not pushed to GitHub. Deployment workflow: write code locally -> push to GitHub (canonical) -> SCP to VPS -> commit locally on VPS. GitHub commit (deb7cdc) is the source of truth. The deployed file SHA256 is the canonical identity of the running script.",
+  "patches_applied": [
+    {
+      "patch": "v1: source breadth/median from microstructure_log.r_m5 (snapshot.r_m5 is NULL)",
+      "commit": "a6fb8c4",
+      "rows_discarded": 70
+    },
+    {
+      "patch": "v2: per-candidate r_m5 from micro, add pool_size_total/pool_size_with_micro",
+      "commit": "deb7cdc",
+      "rows_discarded": 36,
+      "schema_change": "DROP TABLE + recreate with pool_size_total, pool_size_with_micro columns"
+    }
+  ],
   "target_fires": 96,
   "target_rows": 1000,
-  "eta_96_fires_utc": "2026-03-12T00:30:00Z",
-  "eta_1000_rows_utc": "2026-03-11T07:30:00Z"
+  "eta_96_fires_utc": "2026-03-12T00:45:00Z",
+  "eta_1000_rows_utc": "2026-03-11T07:45:00Z"
 }
