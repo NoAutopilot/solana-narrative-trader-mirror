@@ -1,0 +1,29 @@
+run_id,family,branch_type,horizon,lane,direction,sample_definition,n,mean_gross,median_gross,mean_net_proxy,median_net_proxy,pct_positive,ci_lo,ci_hi,outlier_count,top_contributor_share,final_classification
+0c5337dd,lcr_continuation,live_observer,5m,large_cap_ray,continuation,signal=r_m5>0 vs control,248,negative,negative,negative,negative,,crosses_zero,crosses_zero,,low,RANKING_FEATURE_ONLY_NOT_PROMOTABLE
+1677a7da,pfm_continuation,live_observer,5m,pumpfun_mature,continuation,signal=r_m5>0 vs control,212,negative,negative,negative,negative,,crosses_zero,crosses_zero,,low,RANKING_FEATURE_ONLY_NOT_PROMOTABLE
+99ed0fd1,pfm_reversion,live_observer,5m,pumpfun_mature,reversion,signal=r_m5<0 vs control,208,-0.030,,negative,negative,,crosses_zero,crosses_zero,,low,INCONCLUSIVE_ABANDONED
+bb7244cd,lcr_rank_lift_sidecar,live_observer,5m,large_cap_ray,rank_lift,promoted vs baseline top-1,19,-0.045,,,,,not_computed,not_computed,,low,NONBINDING_LOW_INCREMENTAL_VALUE
+,age_conditioned_continuation,retrospective_subgroup,5m,pumpfun_mature,continuation,old_tercile age>53.8h,71,0.003455,-0.024952,0.003455,-0.024952,,−0.006,+0.052,2,0.121,NO_GO_OUTLIER_DRIVEN
+,feature_sweep_track_a_median_pool_r_m5,feature_sweep,5m,all,all,top_tercile,3774,0.005656,0.0,0.000508,0.0,,not_computed,not_computed,1,0.026,CANDIDATE_NET_BARELY_POSITIVE_MEDIAN_ZERO
+,feature_sweep_track_a_breadth_positive_pct,feature_sweep,5m,all,all,top_tercile,3774,0.005124,0.0,-0.000022,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_jup_vs_cpamm_diff_pct,feature_sweep,5m,all,all,top_tercile,3773,0.00168,0.0,-0.003414,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_round_trip_pct,feature_sweep,5m,all,all,top_tercile,3774,0.003357,0.0,-0.001974,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_impact_buy_pct,feature_sweep,5m,all,all,top_tercile,3774,0.003357,0.0,-0.001974,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_impact_sell_pct,feature_sweep,5m,all,all,top_tercile,3774,0.003356,0.0,-0.001975,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_pool_dispersion_r_m5,feature_sweep,5m,all,all,top_tercile,3774,0.001359,0.0,-0.003783,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_age_hours,feature_sweep,5m,all,all,top_tercile,3774,0.002146,0.0,-0.002982,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_liquidity_usd,feature_sweep,5m,all,all,top_tercile,3774,0.003183,0.0,-0.002149,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_a_vol_h1,feature_sweep,5m,all,all,top_tercile,3774,0.001786,0.0,-0.003321,0.0,,not_computed,not_computed,1,0.026,SKIP
+,feature_sweep_track_b_r_m5,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2964,0.008241,0.0,0.003045,-0.00514,-0.00230,+0.00859,13,0.034,CANDIDATE_MEAN_NET_POS_MEDIAN_NEG_CI_CROSSES_ZERO
+,feature_sweep_track_b_vol_accel_m5_vs_h1,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2964,0.007059,0.0,0.001916,-0.00513,-0.00209,+0.00627,10,0.045,CANDIDATE_MEAN_NET_POS_MEDIAN_NEG_CI_CROSSES_ZERO
+,feature_sweep_track_b_txn_accel_m5_vs_h1,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2964,0.006158,0.0,0.001014,0.0,,not_computed,not_computed,9,0.027,CANDIDATE_THIN
+,feature_sweep_track_b_buy_sell_ratio_m5,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2677,0.004333,0.0,-0.000862,0.0,,not_computed,not_computed,9,0.027,SKIP
+,feature_sweep_track_b_signed_flow_m5,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2677,0.004333,0.0,-0.000862,0.0,,not_computed,not_computed,9,0.027,SKIP
+,feature_sweep_track_b_avg_trade_usd_m5,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2677,0.004693,0.0,-0.000394,0.0,,not_computed,not_computed,11,0.027,SKIP
+,feature_sweep_track_b_liq_change_pct,feature_sweep,5m,raydium_pumpswap_subset,all,top_tercile_subset_only,2958,0.003892,0.0,-0.001281,0.0,,not_computed,not_computed,10,0.027,SKIP
+,feature_sweep_track_a_median_pool_r_m5,feature_sweep,15m_winsorized,all,all,top_tercile,2350,,,0.00081,-0.00514,,not_computed,not_computed,,0.026,SKIP
+,feature_sweep_track_a_breadth_positive_pct,feature_sweep,15m_winsorized,all,all,top_tercile,2350,,,0.00091,-0.00514,,not_computed,not_computed,,0.026,SKIP
+,feature_sweep_track_b_r_m5,feature_sweep,15m_winsorized,raydium_pumpswap_subset,all,top_tercile_subset_only,1694,,,0.00048,-0.00514,,not_computed,not_computed,,0.027,SKIP
+,feature_sweep_track_a_median_pool_r_m5,feature_sweep,30m_winsorized,all,all,top_tercile,2193,,,0.00893,-0.00464,,not_computed,not_computed,,0.026,SKIP
+,feature_sweep_track_a_breadth_positive_pct,feature_sweep,30m_winsorized,all,all,top_tercile,2193,,,0.00910,-0.00400,,not_computed,not_computed,,0.026,SKIP
+,feature_sweep_track_b_r_m5,feature_sweep,30m_winsorized,raydium_pumpswap_subset,all,top_tercile_subset_only,1694,0.05333,0.01956,0.04815,0.01960,,not_computed,not_computed,13,0.015,CONDITIONAL_SKIP_SUBSET_ONLY_MOMENTUM_ADJACENT
