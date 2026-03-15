@@ -24,7 +24,7 @@ PUMPPORTAL_WS_URL = "<REDACTED_WSS>/api/data"
 # Helius RPC for holder data
 HELIUS_RPC_URL = os.environ.get(
     "HELIUS_RPC_URL",
-    "https://mainnet.<REDACTED_HELIUS>/?api-key=<REDACTED>"
+    "https://mainnet.<REDACTED_HELIUS>/?api-key=REDACTED<REDACTED>"
 )
 
 # ── Discovery Filters ────────────────────────────────────────────────────────

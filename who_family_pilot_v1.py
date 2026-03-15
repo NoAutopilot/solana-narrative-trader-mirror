@@ -24,14 +24,14 @@ if not HELIUS_RPC:
     if os.path.exists(env_path):
         with open(env_path) as f:
             for line in f:
-                if line.startswith("HELIUS_RPC_URL="):
+                if line.startswith("HELIUS_RPC_URL=REDACTED
                     HELIUS_RPC = line.strip().split("=", 1)[1]
 
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else "/root/solana_trader/reports/new_programs"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Helius API base (extract API key from RPC URL)
-HELIUS_API_KEY = HELIUS_RPC.split("api-key=")[-1] if "api-key=" in HELIUS_RPC else ""
+HELIUS_API_KEY = HELIUS_RPC.split("api-key=REDACTED")[-1] if "api-key=REDACTED" in HELIUS_RPC else ""
 HELIUS_API_BASE = f"https://api.helius.xyz/v0"
 
 # ── SAMPLE DEFINITION ──────────────────────────────────────────────
@@ -83,7 +83,7 @@ def helius_rpc_call(method, params):
 
 def helius_api_call(endpoint, params=None):
     """Make a REST API call to Helius."""
-    url = f"{HELIUS_API_BASE}/{endpoint}?api-key={HELIUS_API_KEY}"
+    url = f"{HELIUS_API_BASE}/{endpoint}?api-key=REDACTED{HELIUS_API_KEY}"
     if params:
         for k, v in params.items():
             url += f"&{k}={v}"
@@ -147,7 +147,7 @@ def parse_transactions_helius(signatures):
     
     sig_list = [s["signature"] for s in signatures[:100]]  # Max 100 per call
     try:
-        url = f"{HELIUS_API_BASE}/transactions?api-key={HELIUS_API_KEY}"
+        url = f"{HELIUS_API_BASE}/transactions?api-key=REDACTED{HELIUS_API_KEY}"
         resp = requests.post(url, json={"transactions": sig_list}, timeout=60)
         resp.raise_for_status()
         return resp.json()
