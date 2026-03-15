@@ -1,0 +1,77 @@
+[12:19:46] T2 Yahoo Finance version starting
+[12:19:46] Reconstitution dates: ['2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02']
+[12:19:46] === STEP 1: Fetching historical data via Yahoo Finance ===
+[12:19:46] Need to fetch: 98 tokens
+[12:19:46]   Fetching 1/98: BONK-USD
+[12:19:54]   Fetching 11/98: BOME-USD
+[12:20:02]   Fetching 21/98: SLIM-USD
+[12:20:08]   Fetching 31/98: AURY-USD
+[12:20:16]   Fetching 41/98: UXD-USD
+[12:20:23]   Fetching 51/98: GST-USD
+[12:20:31]   Fetching 61/98: CLOUD-USD
+[12:20:41]   Fetching 71/98: NOSANA-USD
+[12:20:51]   Fetching 81/98: GIGA-USD
+[12:20:54]   Fetching 91/98: CATANA-USD
+[12:20:57] Historical data available for 44 tokens
+[12:20:57] === STEP 2: Applying rolling monthly filter ===
+[12:20:57]   2025-03-31: 21 tokens pass filter
+[12:20:57]   2025-04-30: 22 tokens pass filter
+[12:20:57]   2025-05-31: 23 tokens pass filter
+[12:20:57]   2025-06-30: 20 tokens pass filter
+[12:20:57]   2025-07-31: 21 tokens pass filter
+[12:20:57]   2025-08-31: 22 tokens pass filter
+[12:20:57]   2025-09-30: 19 tokens pass filter
+[12:20:57]   2025-10-31: 21 tokens pass filter
+[12:20:57]   2025-11-30: 18 tokens pass filter
+[12:20:57]   2025-12-31: 15 tokens pass filter
+[12:20:57]   2026-01-31: 15 tokens pass filter
+[12:20:57]   2026-02-28: 12 tokens pass filter
+[12:20:57] Total cohort entries: 229 | Unique tokens: 24
+[12:20:57] === STEP 3: Simulating trades ===
+[12:20:58]   E1: 229 trades
+[12:20:58]   E2: 229 trades
+[12:20:58]   E3: 229 trades
+[12:20:59]   E4: 229 trades
+[12:20:59]   B1: 229 | B2: 229
+[12:20:59] === STEP 4: Computing net returns ===
+[12:20:59] === STEP 5: Computing metrics ===
+[12:21:00] === STEP 6: Applying pass/fail logic ===
+[12:21:00] === STEP 7: Saving outputs ===
+[12:21:00] 
+[12:21:00] ======================================================================
+[12:21:00] T2 ACTUARIAL BOOK TEST — FINAL RESULTS (Yahoo Finance data)
+[12:21:00] ======================================================================
+[12:21:00] Test period: 2025-03-01 to 2026-03-01
+[12:21:00] Tokens with historical data: 44
+[12:21:00] Unique tokens in cohorts: 24
+[12:21:00] Total cohort entries: 229
+[12:21:00] 
+[12:21:00] Struct     Mean   Median   %Pos  Sharpe Verdict  Key fail reason
+[12:21:00] ────── ──────── ──────── ────── ─────── ──────── ───────────────────────────────────
+[12:21:00] E1       0.0050  -0.0900 41.92%   0.744 FAIL     median=-0.0900<=0; outlier-driven: decil
+[12:21:00] E2      -0.0047  -0.1100 36.24%  -0.566 FAIL     mean=-0.0047<=0 at conservative; mean=-0
+[12:21:00] E3      -0.0518  -0.1600 24.02%  -4.730 FAIL     mean=-0.0518<=0 at conservative; mean=-0
+[12:21:00] E4       0.0071  -0.0800 34.06%   0.962 FAIL     median=-0.0800<=0; outlier-driven: decil
+[12:21:00] 
+[12:21:00] B1 (60d): mean=-0.1203  median=-0.1642  %pos=27.51%
+[12:21:00] B2 (20d): mean=-0.0005  median=-0.0132  %pos=42.79%
+[12:21:00] 
+[12:21:00] OVERALL VERDICT: FAIL  (0/4 structures pass)
+[12:21:00] ======================================================================
+[12:21:00] 
+CONCENTRATION DETAILS (E2 as representative):
+[12:21:00]   top1_pos=-0.18  top3_pos=-0.54  top20_pos=-3.60
+[12:21:00]   top_decile=-3.96  top3_token=-1.54  top10pct_token=-1.22
+[12:21:00]   max_month=0.00 (2025-07)  n_tokens=24
+[12:21:00]   Top tokens by PnL: ['ZEREBRO-USD', 'FARTCOIN-USD', 'WIF-USD', 'MNDE-USD', 'KMNO-USD']
+[12:21:00] 
+SUBPERIOD BREAKDOWN (E2, conservative cost):
+[12:21:00]   SP1: mean=-0.0728  median=-0.1100  %pos=12.12%  n=66
+[12:21:00]   SP2: mean=0.0813  median=0.1762  %pos=64.63%  n=82
+[12:21:00]   SP3: mean=-0.0484  median=-0.1100  %pos=20.29%  n=69
+[12:21:00] 
+CONCURRENCY (E2):
+[12:21:00]   mean_concurrent=6.8  max=25  p75=10.0
+[12:21:00] 
+All outputs: /home/ubuntu/reports/t2_actuarial_book/run_output
+[12:21:00] Script complete.
