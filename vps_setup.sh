@@ -34,14 +34,14 @@ pip3 install python-dotenv
 echo "[4/6] Creating .env file..."
 cat > ~/solana_trader/.env << 'EOF'
 # ── Helius RPC ──
-HELIUS_RPC_URL=https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY
+HELIUS_RPC_URL=REDACTED
 
 # ── Wallet ──
-WALLET_ADDRESS=REDACTED_WALLET_ADDRESS
-SOLANA_PRIVATE_KEY=REDACTED_SOLANA_PRIVATE_KEY
+WALLET_ADDRESS=REDACTED
+SOLANA_PRIVATE_KEY=REDACTED
 
 # ── PumpPortal Lightning API ──
-PUMPPORTAL_API_KEY=REDACTED_PUMPPORTAL_API_KEY
+PUMPPORTAL_API_KEY=REDACTED
 
 # ── Live Trading (OFF by default — paper only) ──
 LIVE_ENABLED=false

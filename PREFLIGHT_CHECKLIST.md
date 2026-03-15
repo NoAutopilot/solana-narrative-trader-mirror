@@ -11,7 +11,7 @@
 # Run this — do not skip
 python3 -c "
 import requests
-HELIUS_RPC='https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY'
+HELIUS_RPC='https://mainnet.helius-rpc.com/?api-key=REDACTED'
 WALLET='REDACTED_WALLET_ADDRESS'
 # Balance
 r = requests.post(HELIUS_RPC, json={'jsonrpc':'2.0','id':1,'method':'getBalance','params':[WALLET]}, timeout=10)
@@ -206,7 +206,7 @@ else:
     print(f'Conviction filter: clean (proactive only)')
 
 # Wallet
-r = requests.post('https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY',
+r = requests.post('https://mainnet.helius-rpc.com/?api-key=REDACTED',
     json={'jsonrpc':'2.0','id':1,'method':'getBalance','params':['REDACTED_WALLET_ADDRESS']}, timeout=10)
 bal = r.json()['result']['value'] / 1e9
 print(f'Wallet balance: {bal:.4f} SOL')
@@ -257,7 +257,7 @@ for m in moonshots:
     print(f'  {m[0]}: {m[1]:+.4f} SOL ({m[2]:+.1%}) exit={m[3]}')
 
 # On-chain balance
-r = requests.post('https://mainnet.helius-rpc.com/?api-key=REDACTED_HELIUS_API_KEY',
+r = requests.post('https://mainnet.helius-rpc.com/?api-key=REDACTED',
     json={'jsonrpc':'2.0','id':1,'method':'getBalance','params':['REDACTED_WALLET_ADDRESS']}, timeout=10)
 bal = r.json()['result']['value'] / 1e9
 print(f'\nFinal wallet balance: {bal:.4f} SOL')

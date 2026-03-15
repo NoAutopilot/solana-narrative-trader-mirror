@@ -20,7 +20,7 @@ WALLET = os.getenv("WALLET_ADDRESS", "")
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "solana_trader.db")
 
 # Extract Helius API key from RPC URL
-API_KEY = RPC.split("api-key=")[-1] if "api-key=" in RPC else ""
+API_KEY = RPC.split("api-key=REDACTED")[-1] if "api-key=REDACTED" in RPC else ""
 HELIUS_API = f"https://<REDACTED_HELIUS_API>/v0"
 
 
@@ -30,7 +30,7 @@ def get_all_transactions(wallet, api_key, limit=100):
     before = None
     
     while True:
-        url = f"https://<REDACTED_HELIUS_API>/v0/addresses/{wallet}/transactions?api-key={api_key}&limit={limit}"
+        url = f"https://<REDACTED_HELIUS_API>/v0/addresses/{wallet}/transactions?api-key=REDACTED{api_key}&limit={limit}"
         if before:
             url += f"&before={before}"
         
