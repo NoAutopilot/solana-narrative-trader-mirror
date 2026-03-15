@@ -1,0 +1,156 @@
+{
+  "verdict": "BLOCKED",
+  "reason": "K1: Only 14 qualifying events (threshold: 15)",
+  "total_events": 14,
+  "events_with_price_data": 14,
+  "classes": [
+    "SUPPLY_CHANGE",
+    "REWARD_CHANGE",
+    "GOVERNANCE_EXECUTION"
+  ],
+  "any_class_passes": false,
+  "passing_classes": [],
+  "results_by_class": {
+    "SUPPLY_CHANGE": {
+      "n": 6,
+      "windows": {
+        "1d": {
+          "mean_net_pct": -1.041,
+          "median_net_pct": -1.466,
+          "pct_pos": 33.3,
+          "bench_mean_pct": 33.237,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": false,
+            "G4_beats_benchmark": false,
+            "G5_concentration": true
+          }
+        },
+        "3d": {
+          "mean_net_pct": -3.282,
+          "median_net_pct": -5.957,
+          "pct_pos": 33.3,
+          "bench_mean_pct": 33.949,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": false,
+            "G4_beats_benchmark": false,
+            "G5_concentration": true
+          }
+        },
+        "7d": {
+          "mean_net_pct": -5.66,
+          "median_net_pct": -0.668,
+          "pct_pos": 50.0,
+          "bench_mean_pct": 32.236,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": false,
+            "G4_beats_benchmark": false,
+            "G5_concentration": true
+          }
+        }
+      }
+    },
+    "REWARD_CHANGE": {
+      "n": 5,
+      "windows": {
+        "1d": {
+          "mean_net_pct": -0.358,
+          "median_net_pct": 1.425,
+          "pct_pos": 60.0,
+          "bench_mean_pct": -1.637,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": true,
+            "G4_beats_benchmark": true,
+            "G5_concentration": true
+          }
+        },
+        "3d": {
+          "mean_net_pct": -4.013,
+          "median_net_pct": -0.194,
+          "pct_pos": 40.0,
+          "bench_mean_pct": -3.189,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": false,
+            "G4_beats_benchmark": false,
+            "G5_concentration": true
+          }
+        },
+        "7d": {
+          "mean_net_pct": -14.187,
+          "median_net_pct": -9.329,
+          "pct_pos": 0.0,
+          "bench_mean_pct": -6.208,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": false,
+            "G4_beats_benchmark": false,
+            "G5_concentration": true
+          }
+        }
+      }
+    },
+    "GOVERNANCE_EXECUTION": {
+      "n": 3,
+      "windows": {
+        "1d": {
+          "mean_net_pct": -1.444,
+          "median_net_pct": -0.266,
+          "pct_pos": 0.0,
+          "bench_mean_pct": -1.112,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": false,
+            "G4_beats_benchmark": false,
+            "G5_concentration": true
+          }
+        },
+        "3d": {
+          "mean_net_pct": -0.65,
+          "median_net_pct": 1.112,
+          "pct_pos": 66.7,
+          "bench_mean_pct": -4.813,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": true,
+            "G4_beats_benchmark": true,
+            "G5_concentration": true
+          }
+        },
+        "7d": {
+          "mean_net_pct": -3.44,
+          "median_net_pct": 7.537,
+          "pct_pos": 66.7,
+          "bench_mean_pct": -6.98,
+          "passes": false,
+          "gates": {
+            "G1_sample": false,
+            "G2_mean_pos": false,
+            "G3_median_pos": true,
+            "G4_beats_benchmark": true,
+            "G5_concentration": true
+          }
+        }
+      }
+    }
+  }
+}

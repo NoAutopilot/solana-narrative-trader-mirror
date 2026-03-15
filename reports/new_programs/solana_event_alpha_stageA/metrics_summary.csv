@@ -1,0 +1,10 @@
+class,window,n,mean_net,median_net,pct_pos,top1_share,bench_mean,bench_median,G1_n>=10,G2_mean>0,G3_median>0,G4_beats_bench,G5_conc<50%,PASS
+SUPPLY_CHANGE,1d,6,-1.041,-1.466,33.3,31.4,33.237,-1.01,False,False,False,False,True,False
+SUPPLY_CHANGE,3d,6,-3.282,-5.957,33.3,26.4,33.949,-0.963,False,False,False,False,True,False
+SUPPLY_CHANGE,7d,6,-5.66,-0.668,50.0,21.7,32.236,-3.382,False,False,False,False,True,False
+REWARD_CHANGE,1d,5,-0.358,1.425,60.0,24.1,-1.637,-1.845,False,False,True,True,True,False
+REWARD_CHANGE,3d,5,-4.013,-0.194,40.0,19.4,-3.189,-3.058,False,False,False,False,True,False
+REWARD_CHANGE,7d,5,-14.187,-9.329,0.0,-9.6,-6.208,-5.917,False,False,False,False,True,False
+GOVERNANCE_EXECUTION,1d,3,-1.444,-0.266,0.0,-3.5,-1.112,-1.173,False,False,False,False,True,False
+GOVERNANCE_EXECUTION,3d,3,-0.65,1.112,66.7,42.7,-4.813,-3.195,False,False,True,True,True,False
+GOVERNANCE_EXECUTION,7d,3,-3.44,7.537,66.7,22.3,-6.98,-8.253,False,False,True,True,True,False

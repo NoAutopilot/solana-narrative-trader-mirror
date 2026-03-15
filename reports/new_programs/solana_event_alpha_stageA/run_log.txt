@@ -1,0 +1,73 @@
+======================================================================
+SOLANA EVENT ALPHA STAGE A — SIMULATION
+======================================================================
+
+[1] Fetching price data...
+  Fetching JUP-USD...
+    Got 731 days for JUP-USD
+  Fetching KMNO-USD...
+    Got 685 days for KMNO-USD
+  Fetching MNDE-USD...
+    Got 731 days for MNDE-USD
+  Fetching JTO-USD...
+    Got 731 days for JTO-USD
+  Fetching PYTH-USD...
+    Got 731 days for PYTH-USD
+
+[2] Computing event returns...
+  SC-001 JUP 2025-09-28: p0=0.0009 p1d=0.0009 p7d=0.0010
+  SC-002 JUP 2025-10-28: p0=0.0009 p1d=0.0009 p7d=0.0007
+  SC-003 JUP 2025-11-28: p0=0.0006 p1d=0.0006 p7d=0.0007
+  SC-004 JUP 2025-12-28: p0=0.0007 p1d=0.0007 p7d=0.0007
+  SC-005 JUP 2026-01-28: p0=0.0006 p1d=0.0006 p7d=0.0005
+  SC-006 JUP 2026-02-28: p0=0.0002 p1d=0.0002 p7d=0.0002
+  RW-001 KMNO 2025-11-07: p0=0.0612 p1d=0.0599 p7d=0.0564
+  RW-002 MNDE 2025-09-15: p0=0.1613 p1d=0.1644 p7d=0.1385
+  RW-003 MNDE 2026-01-29: p0=0.0357 p1d=0.0336 p7d=0.0246
+  GV-001 JTO 2025-10-28: p0=1.0573 p1d=1.0598 p7d=0.7656
+  GV-002 JTO 2025-12-22: p0=0.3562 p1d=0.3574 p7d=0.3848
+  GV-003 JUP 2026-02-23: p0=0.0002 p1d=0.0002 p7d=0.0002
+  RW-004 KMNO 2025-10-02: p0=0.0767 p1d=0.0800 p7d=0.0718
+  RW-005 PYTH 2025-12-12: p0=0.0638 p1d=0.0653 p7d=0.0581
+
+[3] Computing benchmarks...
+
+[4] Computing metrics by class...
+
+[5] Determining verdict...
+
+  VERDICT: BLOCKED
+  Reason: K1: Only 14 qualifying events (threshold: 15)
+
+[6] Saving outputs...
+
+======================================================================
+FINAL VERDICT: BLOCKED
+Reason: K1: Only 14 qualifying events (threshold: 15)
+======================================================================
+
+Event-level results (conservative cost, 7d window):
+  SC-001 JUP 2025-09-28: net_7d=17.20% 
+  SC-002 JUP 2025-10-28: net_7d=-28.13% 
+  SC-003 JUP 2025-11-28: net_7d=5.42% 
+  SC-004 JUP 2025-12-28: net_7d=0.08% 
+  SC-005 JUP 2026-01-28: net_7d=-27.11% 
+  SC-006 JUP 2026-02-28: net_7d=-1.42% 
+  RW-001 KMNO 2025-11-07: net_7d=-8.40% 
+  RW-002 MNDE 2025-09-15: net_7d=-14.60% 
+  RW-003 MNDE 2026-01-29: net_7d=-31.79% 
+  GV-001 JTO 2025-10-28: net_7d=-28.09% 
+  GV-002 JTO 2025-12-22: net_7d=7.54% 
+  GV-003 JUP 2026-02-23: net_7d=10.23% 
+  RW-004 KMNO 2025-10-02: net_7d=-6.82% 
+  RW-005 PYTH 2025-12-12: net_7d=-9.33% 
+
+Class-level summary (conservative cost):
+  SUPPLY_CHANGE W1d: n=6 mean=-1.04% median=-1.47% bench_mean=33.24% PASS=False
+  SUPPLY_CHANGE W7d: n=6 mean=-5.66% median=-0.67% bench_mean=32.24% PASS=False
+  REWARD_CHANGE W1d: n=5 mean=-0.36% median=1.43% bench_mean=-1.64% PASS=False
+  REWARD_CHANGE W7d: n=5 mean=-14.19% median=-9.33% bench_mean=-6.21% PASS=False
+  GOVERNANCE_EXECUTION W1d: n=3 mean=-1.44% median=-0.27% bench_mean=-1.11% PASS=False
+  GOVERNANCE_EXECUTION W7d: n=3 mean=-3.44% median=7.54% bench_mean=-6.98% PASS=False
+
+Done.
