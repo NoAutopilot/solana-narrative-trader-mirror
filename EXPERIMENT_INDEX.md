@@ -68,3 +68,5 @@ See `reports/research/DECISION_TREE_v1.md` for all allowed next moves.
 - **Result:** Anti-signal (z = -3.12 against hypothesis). Deployer ID blocked. Poor feasibility.
 - **Artifacts:** reports/new_programs/who_family_pilot_v1_*.md
 - **No-Go:** NG-008
+
+| 012 | drift_perps_state_stageA | Drift SOL-PERP state variables (funding, spread, liquidations) | NO-GO | 2026-03-15 | 0/27 passed |

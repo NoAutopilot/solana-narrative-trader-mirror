@@ -409,3 +409,11 @@ The "who" family (deployer recidivism, early-buyer overlap, smart-money concentr
 4. **The Helius Enhanced API misses many pumpfun-era transactions**, making early buyer extraction unreliable without custom indexing.
 
 **Lesson:** Do not assume that "more exotic data = more signal." The wallet family requires heavy infrastructure investment with no prior evidence of payoff. The pilot produced the clearest negative result of any program to date.
+
+---
+
+### Entry 014 — Drift Perps State Study (2026-03-15)
+
+**Finding:** Drift SOL-PERP funding rate z-scores, mark-oracle TWAP spreads, and liquidation clusters do not produce a cost-adjusted edge at +15m, +1h, or +4h horizons. Funding dislocation predicts continuation (not reversion) but the effect is too small to trade. Mark-oracle spread is structurally one-directional (persistent discount), not a tradable dislocation. Liquidation data from the Drift API is limited to ~12 hours of history, making H3 structurally untestable without a custom indexer.
+
+**Implication:** Derivatives market structure on Drift does not offer a simple state-based signal any more than spot microstructure did. The research program has now tested spot momentum, spot microstructure, spot swing, wallet/deployer, and perps state — all NO-GO. The Solana token trading signal search is exhausted across all tested families.

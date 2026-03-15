@@ -256,3 +256,13 @@ See `reports/synthesis/post_v2_options.md` for details.
 - Data feasibility: Poor (55% extraction rate, asymmetric)
 
 **Decision:** Close the wallet signal family. All three post-v2 options have been evaluated. No viable research line remains.
+
+---
+
+## Section 10: Drift Perps State Study (2026-03-15)
+
+**Question:** Do Drift SOL-PERP state variables (funding, mark-oracle spread, liquidations) contain a tradable edge?
+
+**Answer:** No. 0/27 combinations passed all gates. Funding dislocation shows no mean-reversion. Mark-oracle spread is structural, not tradable. Liquidation data is too shallow for evaluation.
+
+**Decision:** NO-GO. No Stage B. Research program exhausted across all tested families (spot momentum, spot microstructure, spot swing, wallet/deployer, derivatives state).

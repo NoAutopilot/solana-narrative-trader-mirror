@@ -1,0 +1,15 @@
+{
+  "h1_total_events": 364,
+  "h2_total_events": 171,
+  "h3_total_events": 6,
+  "h1_funding_z_stats": {
+    "mean_abs_z": 2.0725657949803904,
+    "max_abs_z": 4.308598740572805,
+    "pct_positive_z": 0.6208791208791209
+  },
+  "h2_spread_stats": {
+    "mean_abs_spread": 0.12976703859471644,
+    "max_abs_spread": 0.24983921807593418,
+    "pct_positive_spread": 0.0
+  }
+}

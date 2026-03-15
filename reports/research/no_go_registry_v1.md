@@ -225,3 +225,18 @@ No feature-horizon combination passed all eight promotion gates (G1-G8) in the d
 | Sample | 20 tokens (10 stronger, 10 weaker) from frozen 96-fire artifact |
 | Data gaps | 0/20 deployer wallets identified; only 11/20 tokens yielded early buyer data |
 | Recommendation | Do not pursue. No evidence of signal; structural data blockers. |
+
+---
+
+## NG-009: Drift Perps State Study — Stage A
+
+| Field | Value |
+|-------|-------|
+| Date | 2026-03-15 |
+| Experiment | 012 |
+| Hypothesis | Funding dislocation, mark-oracle divergence, liquidation/stress in Drift SOL-PERP |
+| Combinations Tested | 27 (3 hypotheses × 3 horizons × 3 costs) |
+| Passing | 0 |
+| Best Result | H3 +4h: +0.567% net, but N=4 and top-1=49% |
+| Kill Reason | No edge in adequately-powered hypotheses (H1, H2). H3 underpowered (N=4) with extreme concentration. |
+| Artifacts | reports/new_programs/drift_perps_state_stageA_*.md |
