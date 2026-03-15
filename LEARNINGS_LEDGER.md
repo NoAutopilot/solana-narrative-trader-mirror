@@ -430,3 +430,14 @@ The "who" family (deployer recidivism, early-buyer overlap, smart-money concentr
 **Key learning:** Median is the right primary metric for LP proxy studies. The toxic-flow filter is counterintuitive but mechanically sound: large price moves generate large volume, which generates large fee income.
 
 **Action:** Stage B requires exact LP PnL data (Helius/Bitquery paid API). Do not act on Stage A proxy result alone.
+
+---
+
+## Entry 016 — Meteora LP Stage B: Small-Sample False Positives in DeFi Research
+
+**Date:** 2026-03-15  
+**Experiment:** 014
+
+Stage A produced a false positive (H2 toxic flow +4h, N=844, mean +1.033%) driven by two Memehouse-SOL pools with anomalous 1-day lifespans and >5%/day fee/TVL ratios. Stage B with 38 pools and 2,365 events fully reversed the result (mean -0.278%, CI entirely negative).
+
+**Lesson:** In Solana DeFi research, small pool universes (<20 pools) are highly susceptible to false positives from transient anomalous pools. Any Stage A result must be treated as a hypothesis, not a finding, until replicated on a 3× broader universe. The minimum viable pool universe for Meteora DLMM research is ≥30 pools with ≥30 days of history each.

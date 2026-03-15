@@ -72,3 +72,5 @@ See `reports/research/DECISION_TREE_v1.md` for all allowed next moves.
 | 012 | drift_perps_state_stageA | Drift SOL-PERP state variables (funding, spread, liquidations) | NO-GO | 2026-03-15 | 0/27 passed |
 
 | 013 | meteora_lp_state_stageA | 2026-03-15 | CONDITIONAL GO | H2 toxic +4h passes all gates. Stage B pending. |
+
+| 014 | meteora_lp_state_stageB | 2026-03-15 | CLOSED | NO-GO | H2 toxic flow +4h falsified on 38-pool universe. Stage A false positive confirmed. |

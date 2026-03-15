@@ -258,3 +258,19 @@ No feature-horizon combination passed all eight promotion gates (G1-G8) in the d
 
 **Stage B data requirement:** Helius or Bitquery paid API for exact LP PnL.
 
+
+---
+
+## NG-011 — Meteora LP State Study Stage B (H2 Toxic Flow Filter +4h)
+
+**Date closed:** 2026-03-15  
+**Experiment:** 014  
+**Verdict:** NO-GO — Stage A false positive falsified  
+
+**What was tested:** H2 Toxic Flow Filter at +4h (the sole Stage A survivor). Retested on 38 pools / 2,365 events with improved PnL model.
+
+**Result:** Winsorized mean -0.278%, median -0.083%, CI [-0.325%, -0.234%]. Negative at all 4 thresholds. 6/20 pools positive median. 0/10 gates pass.
+
+**Root cause of Stage A false positive:** Two Memehouse-SOL pools (short-lived, 1 day of activity, anomalous fee/TVL ratios) drove the Stage A result. These pools no longer exist.
+
+**Kill reason:** Signal fully reversed on expanded universe. No basis for Stage C.
