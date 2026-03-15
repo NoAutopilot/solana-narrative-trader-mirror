@@ -48,3 +48,14 @@ See `reports/research/CURRENT_STATE.md` for authoritative current state.
 See `reports/research/DECISION_TREE_v1.md` for all allowed next moves.
 
 ---
+
+### 010 — Large-Cap Swing Stage A
+| Field | Value |
+|-------|-------|
+| Family | Large-Cap Swing |
+| Status | CLOSED / NO-GO |
+| Date | 2026-03-15 |
+| Universe | 25 tokens, point-in-time dynamic |
+| Signals | Pullback in uptrend, Breakout from consolidation |
+| Key result | 0/18 scenarios passed. Negative expected value before costs. |
+| Artifacts | reports/new_programs/largecap_swing_stageA_*.md |

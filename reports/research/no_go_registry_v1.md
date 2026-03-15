@@ -192,3 +192,20 @@ No feature-horizon combination passed all eight promotion gates (G1-G8) in the d
 - Bootstrap 95% CI lower bound > 0
 - Holdout confirmation on a dataset not used during feature development
 - Do NOT re-run the same 42 features with minor parameter changes
+
+---
+
+## NG-007 — Large-Cap Swing Stage A (Experiment 010)
+
+| Field | Value |
+|-------|-------|
+| Date | 2026-03-15 |
+| Program | Large-Cap Swing |
+| Universe | 25 tokens, point-in-time (liq >= $100k, vol_h24 >= $100k, age >= 48h) |
+| Signals | Pullback in uptrend (N=108), Breakout from consolidation (N=16) |
+| Horizons | +1h, +4h, +1d |
+| Cost scenarios | 0.5%, 1.0%, 1.5% |
+| Scenarios tested | 18 |
+| Scenarios passing | 0 |
+| Root cause | Both signals produce negative expected value before costs. No edge exists in this universe/signal/horizon combination. |
+| Disposition | Closed at Stage A. No Stage B. |

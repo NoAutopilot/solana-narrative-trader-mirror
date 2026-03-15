@@ -383,3 +383,13 @@ The signal is fundamentally weak. No feature separates future winners from the p
 5. **Automated pipeline infrastructure (autopilot, freeze, sweep scripts) works but requires operational attention.** The autopilot did not complete autonomously due to the scanner gap. Manual intervention was required. The sweep scripts had timestamp format bugs (datetime() vs epoch) and column name mismatches (mint vs mint_address). Future programs should include integration tests against a frozen test DB before deployment.
 
 6. **Disk management must be part of the operational plan.** Backup accumulation filled the disk to 100% within 24 hours of the 96-fire threshold. Retention policies must be configured and tested before any multi-day collection run.
+
+---
+
+### Entry 012 — Large-Cap Swing Stage A (2026-03-15)
+
+**Context:** Tested pullback-in-uptrend and breakout-from-consolidation entries on a point-in-time large-cap Solana token universe (25 tokens, liq >= $100k, vol_h24 >= $100k, age >= 48h) at +1h/+4h/+1d horizons.
+
+**Finding:** Neither signal produces positive expected value, even gross (before costs). The pullback signal has a gross mean near zero at +1h and negative at longer horizons. The breakout signal has too few events (N=16) and no edge beyond +1h. Simple technical patterns (SMA-based pullback, range breakout) do not capture exploitable inefficiencies in established Solana DEX tokens.
+
+**Implication:** Time-series technical signals on larger-cap Solana tokens are unlikely to be productive. The remaining untested direction is wallet/deployer/early-buyer signals (Option C from post_v2_options.md), which would require on-chain transaction data rather than price/volume data.

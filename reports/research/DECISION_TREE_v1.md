@@ -228,3 +228,15 @@ Final recommendation: STOP
 
 **Current state:** Awaiting human decision among options A, B, or C.
 See `reports/synthesis/post_v2_options.md` for details.
+
+---
+
+## Section 8: Large-Cap Swing Stage A (2026-03-15)
+
+**Question:** Do established Solana tokens show a cost-adjusted edge for pullback or breakout entries at slower horizons?
+
+**Answer:** NO. 0/18 scenarios passed. Both signals produce negative expected value before costs.
+
+**Decision:** Close Large-Cap Swing program at Stage A. Do not proceed to Stage B.
+
+**Remaining path:** Option A (stop) or Option C (wallet/deployer/early-buyer).

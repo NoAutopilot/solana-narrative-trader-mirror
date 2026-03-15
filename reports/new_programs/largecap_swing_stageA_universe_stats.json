@@ -1,0 +1,13 @@
+{
+  "total_snapshot_rows": 271288,
+  "universe_rows_after_gates": 94344,
+  "distinct_tokens_in_universe": 25,
+  "hourly_bars": 1634,
+  "bars_with_indicators": 1297,
+  "pullback_events": 108,
+  "breakout_events": 16,
+  "total_events": 124,
+  "hour_range_start": "2026-03-09 17:00:00",
+  "hour_range_end": "2026-03-15 02:00:00",
+  "gap_window": "2026-03-13T06:27:00 to 2026-03-13T18:43:00"
+}
